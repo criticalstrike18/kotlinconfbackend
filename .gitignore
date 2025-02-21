@@ -12,7 +12,7 @@ out
 .directory
 node_modules
 local.properties
-backend
+
 .DS_Store
 .externalNativeBuild
 .database
