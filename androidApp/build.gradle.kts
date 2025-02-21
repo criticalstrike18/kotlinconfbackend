@@ -29,13 +29,13 @@ kotlin {
 }
 
 android {
-    namespace = "com.jetbrains.kotlinconf"
+    namespace = "com.jetbrains.kotlinApp"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     sourceSets["main"].manifest.srcFile("src/androidMain/AndroidManifest.xml")
 
     defaultConfig {
-        applicationId = "com.jetbrains.kotlinconf"
+        applicationId = "com.jetbrains.kotlinApp"
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
         versionCode = 38

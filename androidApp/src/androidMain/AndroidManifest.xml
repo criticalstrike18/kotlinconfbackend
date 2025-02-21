@@ -12,28 +12,27 @@
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
-        android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher_mono"
+        android:label="KotlinApp"
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         tools:targetApi="31">
-
+        <service
+            android:name="org.jetbrains.kotlinApp.AudioService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false"
+            android:stopWithTask="false">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService"/>
+            </intent-filter>
+        </service>
         <activity
-            android:name="org.jetbrains.kotlinconf.android.MainActivity"
+            android:name="org.jetbrains.kotlinApp.android.MainActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <service
-            android:name="org.jetbrains.kotlinconf.AudioService"
-            android:foregroundServiceType="mediaPlayback"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="androidx.media3.session.MediaSessionService"/>
-            </intent-filter>
-        </service>
     </application>
 </manifest>

@@ -165,7 +165,7 @@ kotlin {
 }
 
 android {
-    namespace = "org.jetbrains.kotlinconf"
+    namespace = "org.jetbrains.kotlinApp"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     sourceSets["main"].manifest.srcFile("src/androidMain/AndroidManifest.xml")
@@ -193,7 +193,7 @@ android {
 
 compose.desktop {
     application {
-        mainClass = "org.jetbrains.kotlinconf.MainKt"
+        mainClass = "org.jetbrains.kotlinApp.MainKt"
     }
 }
 
@@ -223,7 +223,7 @@ compose.desktop {
 sqldelight {
     databases {
         create("SessionDatabase") {
-            packageName.set("org.jetbrains.kotlinconf")
+            packageName.set("org.jetbrains.kotlinApp")
         }
     }
 }

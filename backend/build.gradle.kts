@@ -23,7 +23,7 @@ kotlin {
 }
 
 application {
-    mainClass.set("org.jetbrains.kotlinconf.backend.MainKt")
+    mainClass.set("org.jetbrains.kotlinApp.backend.MainKt")
 }
 
 dependencies {

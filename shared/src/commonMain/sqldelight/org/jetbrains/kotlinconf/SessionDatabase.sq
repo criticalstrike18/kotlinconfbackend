@@ -353,8 +353,6 @@ CREATE TABLE PodcastChannels (
     lastBuildDate INTEGER NOT NULL
 );
 
-CREATE INDEX channel_id_idx ON PodcastChannels(id);
-
 CREATE TABLE PodcastEpisodes (
     id INTEGER NOT NULL PRIMARY KEY,
     channelId INTEGER NOT NULL,
@@ -371,18 +369,26 @@ CREATE TABLE PodcastEpisodes (
     mediaLength INTEGER NOT NULL
 );
 
-CREATE UNIQUE INDEX episodes_guid_idx ON PodcastEpisodes(guid);
-
-CREATE INDEX episodes_channel_idx ON PodcastEpisodes(channelId);
-CREATE INDEX episodes_pubDate_idx ON PodcastEpisodes(pubDate);
-
 CREATE TABLE PodcastCategories (
-    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    channelId INTEGER NOT NULL,
-    name TEXT NOT NULL
+   id INTEGER NOT NULL PRIMARY KEY,
+   name TEXT NOT NULL UNIQUE
 );
 
-CREATE UNIQUE INDEX categories_unique ON PodcastCategories(channelId, name);
+CREATE TABLE ChannelCategoryMap (
+    channelId INTEGER NOT NULL,
+    categoryId INTEGER NOT NULL,
+    PRIMARY KEY (channelId, categoryId),
+    FOREIGN KEY (channelId) REFERENCES PodcastChannels(id),
+    FOREIGN KEY (categoryId) REFERENCES PodcastCategories(id)
+);
+
+CREATE TABLE EpisodeCategoryMap (
+    episodeId INTEGER NOT NULL,
+    categoryId INTEGER NOT NULL,
+    PRIMARY KEY (episodeId, categoryId),
+    FOREIGN KEY (episodeId) REFERENCES PodcastEpisodes(id),
+    FOREIGN KEY (categoryId) REFERENCES PodcastCategories(id)
+);
 
 -- Upsert or Insert queries for Channels
 insertChannel:
@@ -417,7 +423,27 @@ selectAllChannels:
 SELECT *
 FROM PodcastChannels;
 
--- Similarly for episodes (partial example)
+
+selectChannelByEpisodeId:
+SELECT c.*
+FROM PodcastChannels c
+INNER JOIN PodcastEpisodes e ON e.channelId = c.id
+WHERE e.id = ?;
+
+getAllChannelDetails:
+SELECT
+    c.*,
+    COUNT(DISTINCT e.id) AS episodeCount,
+    MIN(e.pubDate) AS earliestEpisodePubDate,
+    MAX(e.pubDate) AS latestEpisodePubDate,
+    GROUP_CONCAT(DISTINCT pc.name) AS categories
+FROM PodcastChannels c
+LEFT JOIN PodcastEpisodes e ON e.channelId = c.id
+LEFT JOIN ChannelCategoryMap ccm ON c.id = ccm.channelId
+LEFT JOIN PodcastCategories pc ON ccm.categoryId = pc.id
+GROUP BY c.id;
+
+-- Similarly for episodes
 insertEpisode:
 INSERT INTO PodcastEpisodes(
   id, channelId, guid, title, description, link,
@@ -448,7 +474,87 @@ SELECT *
 FROM PodcastEpisodes
 WHERE id = ?;
 
+selectEpisodesByGuid:
+SELECT *
+FROM PodcastEpisodes
+WHERE guid = ?;
+
 selectEpisodesByChannelId:
 SELECT *
 FROM PodcastEpisodes
 WHERE channelId = ?;
+
+-- Enhanced Episode Queries
+getEpisodeWithCategories:
+SELECT
+    e.*,
+    GROUP_CONCAT(pc.name) AS categories
+FROM PodcastEpisodes e
+LEFT JOIN EpisodeCategoryMap ecm ON e.id = ecm.episodeId
+LEFT JOIN PodcastCategories pc ON ecm.categoryId = pc.id
+WHERE e.id = ?
+GROUP BY e.id;
+
+getEpisodesByChannelWithCategories:
+SELECT
+    e.*,
+    GROUP_CONCAT(pc.name) AS categories
+FROM PodcastEpisodes e
+LEFT JOIN EpisodeCategoryMap ecm ON e.id = ecm.episodeId
+LEFT JOIN PodcastCategories pc ON ecm.categoryId = pc.id
+WHERE e.channelId = ?
+GROUP BY e.id;
+
+--Categories queries
+insertPodcastCategory:
+INSERT OR IGNORE INTO PodcastCategories(name) VALUES (?);
+
+selectPodcastCategoryByName:
+SELECT id, name FROM PodcastCategories WHERE name = ?;
+
+-- Channel Category Mapping Operations
+insertChannelCategory:
+INSERT OR IGNORE INTO ChannelCategoryMap(channelId, categoryId) VALUES (?, ?);
+
+selectChannelCategories:
+SELECT pc.name
+FROM PodcastCategories pc
+INNER JOIN ChannelCategoryMap ccm ON pc.id = ccm.categoryId
+WHERE ccm.channelId = ?;
+
+-- Episode Category Mapping Operations
+insertEpisodeCategory:
+INSERT OR IGNORE INTO EpisodeCategoryMap(episodeId, categoryId) VALUES (?, ?);
+
+selectEpisodeCategories:
+SELECT pc.name
+FROM PodcastCategories pc
+INNER JOIN EpisodeCategoryMap ecm ON pc.id = ecm.categoryId
+WHERE ecm.episodeId = ?;
+
+
+CREATE TABLE PlaybackState (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episodeId TEXT,
+    channelId TEXT,  -- Adding channelId for faster channel loading
+    position INTEGER NOT NULL,
+    url TEXT,
+    speed REAL NOT NULL,
+    isBoostEnabled INTEGER NOT NULL,
+    timestamp INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+selectLastPlaybackState:
+SELECT * FROM PlaybackState
+ORDER BY timestamp DESC
+LIMIT 1;
+
+insertPlaybackState:
+INSERT INTO PlaybackState (
+    episodeId,
+    channelId,
+    position,
+    url,
+    speed,
+    isBoostEnabled
+) VALUES (?, ?, ?, ?, ?, ?);
