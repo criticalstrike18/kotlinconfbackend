@@ -9,15 +9,12 @@ import io.ktor.server.config.ApplicationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.datetime.Instant
 import org.jetbrains.exposed.sql.Database
-import org.jetbrains.exposed.sql.Op
 import org.jetbrains.exposed.sql.SchemaUtils
 import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -35,6 +32,7 @@ import org.jetbrains.kotlinApp.SessionInfo
 import org.jetbrains.kotlinApp.Speaker
 import org.jetbrains.kotlinApp.SpeakerInfo
 import org.jetbrains.kotlinApp.VoteInfo
+import org.jetbrains.kotlinApp.backend.Feedback.feedback
 import org.jetbrains.kotlinApp.backend.Votes.sessionId
 import java.time.LocalDateTime
 
@@ -82,7 +80,8 @@ internal class Store(application: Application) {
                 PodcastEpisodes,
                 PodcastCategories,
                 ChannelCategoryMap,
-                EpisodeCategoryMap
+                EpisodeCategoryMap,
+                PodcastRequest
             )
         }
     }
@@ -452,6 +451,20 @@ internal class Store(application: Application) {
             .map { it[SessionCategories.categoryId]}
     }
 
+    suspend fun storePodcastQuery(
+        userIdValue: String,
+        titleValue: String,
+        authorValue: String,
+        rssLinkValue: String,
+    ): Boolean = newSuspendedTransaction(Dispatchers.IO) {
+        PodcastRequest.insert {
+            it[userId] = userIdValue
+            it[title] = titleValue
+            it[author] = authorValue
+            it[rssLink] = rssLinkValue
+        }.insertedCount > 0
+    }
+
     suspend fun storePodcastData(importRequest: PodcastImportRequest): Int =
         newSuspendedTransaction(Dispatchers.IO) {
             // 1. Insert the channel and get its id.
@@ -601,7 +614,6 @@ internal class Store(application: Application) {
             }
         channels
     }
-
 }
 
 

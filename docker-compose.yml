@@ -36,6 +36,22 @@ services:
     networks:
       - app-network
 
+  importService:
+    image: criticalstrike/bulkimportservice:latest
+    ports:
+       - "8000:8000"
+    environment:
+        - PORT=8000
+        - DATABASE_HOST=db
+        - DATABASE_PORT=5432
+        - DATABASE_NAME=kotlinconfg
+        - DATABASE_USER=postgres
+        - DATABASE_PASSWORD=postgres
+    depends_on:
+      - db
+    networks:
+      - app-network
+
   pgadmin:
     image: dpage/pgadmin4
     environment:

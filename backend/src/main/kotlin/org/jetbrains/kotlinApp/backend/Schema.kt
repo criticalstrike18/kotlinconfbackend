@@ -5,6 +5,7 @@ import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.kotlin.datetime.CurrentDateTime
 import org.jetbrains.exposed.sql.kotlin.datetime.datetime
 import org.jetbrains.exposed.sql.kotlin.datetime.timestamp
+import org.jetbrains.kotlinApp.backend.PodcastChannels.autoIncrement
 import org.jetbrains.kotlinApp.backend.PodcastEpisodes.channelId
 
 abstract class BaseTable(name: String) : Table(name) {
@@ -139,6 +140,18 @@ object SessionCategories : Table() {
         index(false, categoryId)
     }
 }
+
+internal object PodcastRequest: BaseTable("podcast_request_table") {
+    val userId: Column<String> = varchar("uuid", 50)
+        .index()
+    private val id = integer("id").autoIncrement()
+    val title: Column<String> = varchar("title", length = 5000)
+    val author: Column<String> = varchar("author", length = 5000)
+    val rssLink: Column<String> = varchar("rssUrl", length = 5000)
+
+    override val primaryKey: PrimaryKey = PrimaryKey(id)
+}
+
 object PodcastChannels : BaseTable("podcast_channels") {
     val id = integer("id").autoIncrement()
     val title = varchar("title", 500)

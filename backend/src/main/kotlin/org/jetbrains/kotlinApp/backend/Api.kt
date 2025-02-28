@@ -1,24 +1,33 @@
+@file:OptIn(ExperimentalSerializationApi::class)
+
 package org.jetbrains.kotlinApp.backend
 
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.auth.principal
 import io.ktor.server.plugins.NotFoundException
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.util.date.GMTDate
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.encodeToByteArray
+import kotlinx.serialization.protobuf.ProtoBuf
 import org.jetbrains.kotlinApp.ConferenceSessionRequest
 import org.jetbrains.kotlinApp.FeedbackInfo
+import org.jetbrains.kotlinApp.PodcastQueryInfo
 import org.jetbrains.kotlinApp.RoomResponse
 import org.jetbrains.kotlinApp.SessionCategoriesRequest
 import org.jetbrains.kotlinApp.SessionResponse
 import org.jetbrains.kotlinApp.SessionSpeakerRequest
 import org.jetbrains.kotlinApp.VoteInfo
 import org.jetbrains.kotlinApp.Votes
+import org.jetbrains.kotlinApp.backend.Feedback.feedback
 import java.time.Clock
 import java.time.LocalDateTime
 
@@ -402,6 +411,20 @@ private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
 }
 
 private fun Route.podcastRoutes(database: Store, adminSecret: String) {
+
+    post("/podcast/sendRequest") {
+        val principal = call.validatePrincipal(database) ?: throw Unauthorized()
+        val query = call.receive<PodcastQueryInfo>()
+        val result = database.storePodcastQuery(
+            principal.token, query.title, query.author, query.rssLink
+        )
+        if (result) {
+            call.respond(HttpStatusCode.OK)
+        } else {
+            call.respond(HttpStatusCode.Forbidden)
+        }
+    }
+
     post("/podcast/import") {
         try {
             val importRequest = call.receive<PodcastImportRequest>()
@@ -425,7 +448,8 @@ private fun Route.podcastRoutes(database: Store, adminSecret: String) {
     get("/podcast/all") {
         try {
             val data = database.getAllPodcastData()
-            call.respond(HttpStatusCode.OK, data)
+            val byteArray = ProtoBuf.encodeToByteArray(data)
+            call.respondBytes(byteArray, ContentType.Application.ProtoBuf)
         } catch (e: Exception) {
             e.printStackTrace()
             call.respond(HttpStatusCode.InternalServerError, "Failed to fetch data: ${e.message}")
