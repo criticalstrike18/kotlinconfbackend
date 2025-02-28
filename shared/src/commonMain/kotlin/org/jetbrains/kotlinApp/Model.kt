@@ -252,3 +252,10 @@ data class ChannelFullData(
     // All episodes for this channel
     val episodes: List<EpisodeData> = emptyList()
 )
+
+@Serializable
+class PodcastQueryInfo(
+    val title: String,
+    val author: String,
+    val rssLink: String
+)

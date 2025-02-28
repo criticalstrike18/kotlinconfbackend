@@ -31,7 +31,7 @@ import org.jetbrains.kotlinApp.utils.StateFlowClass
 
 typealias View = @Composable (AppController) -> Unit
 
-class AppController(private val service: ConferenceService, private val podcastViewModel: PodcastViewModel) {
+class AppController(internal val service: ConferenceService, private val podcastViewModel: PodcastViewModel) {
     private val stack = mutableListOf<View>()
     val last: MutableStateFlow<View?> = MutableStateFlow(null)
     val sessions: StateFlowClass<List<SessionCardView>> = service.sessionCards
@@ -212,12 +212,17 @@ class AppController(private val service: ConferenceService, private val podcastV
 
     fun showSearch() {
         push {
-            val agenda by service.agenda.collectAsState()
-            val sessions = agenda.days.flatMap { it.timeSlots.flatMap { it.sessions } }
-            val channels by service.podcastChannels.collectAsState()
-            SearchScreen(it, sessions, channels)
+//            val sessions by service.agenda.collectAsState()
+//            val allSessions = sessions.days.flatMap { it.timeSlots }.flatMap { it.sessions }
+
+//            val podcasts by service.podcastChannels.collectAsState()
+//            val episodes by service.allEpisodes.collectAsState()
+
+            SearchScreen(it)
         }
     }
+
+    // Make sure your ConferenceService has these paginated search methods:
 
     fun showAppInfo() {
         push {
@@ -245,6 +250,15 @@ class AppController(private val service: ConferenceService, private val podcastV
                     // Optionally show a confirmation message or refresh data
                     refreshData()
                 },
+                back = { back() }
+            )
+        }
+    }
+
+    fun showPodcastRequestForm() {
+        push {
+            PodcastRequestScreen(
+                service = service,
                 back = { back() }
             )
         }
@@ -313,4 +327,5 @@ class AppController(private val service: ConferenceService, private val podcastV
         // Trigger any necessary data refresh after session creation
         service.updateConferenceData()
     }
+
 }

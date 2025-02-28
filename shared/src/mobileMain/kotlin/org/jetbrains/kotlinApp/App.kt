@@ -14,7 +14,7 @@ import org.jetbrains.kotlinApp.podcast.PodcastViewModel
 import org.jetbrains.kotlinApp.ui.MainScreen
 import org.jetbrains.kotlinApp.ui.theme.KotlinConfTheme
 
-const val apiEndpoint = "http://34.46.220.145:8080"
+const val apiEndpoint = "http://192.168.29.32:8080"
 
 @Composable
 fun App(context: ApplicationContext) {

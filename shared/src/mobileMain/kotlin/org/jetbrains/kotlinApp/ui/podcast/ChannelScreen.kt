@@ -176,7 +176,11 @@ private fun ChannelCard(
                             style = MaterialTheme.typography.caption.copy(color = grey50),
                         )
                         Text(
-                            text = "${formatDateForChannelScreen(channel.earliestEpisodePubDate!!)} - ${formatDateForChannelScreen(channel.latestEpisodePubDate!!)}",
+                            text = "${channel.earliestEpisodePubDate?.let {
+                                formatDateForChannelScreen(
+                                    it
+                                )
+                            }} - ${channel.latestEpisodePubDate?.let { formatDateForChannelScreen(it) }}",
                             style = MaterialTheme.typography.caption.copy(color = grey50),
                         )
                     }

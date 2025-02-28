@@ -532,6 +532,152 @@ FROM PodcastCategories pc
 INNER JOIN EpisodeCategoryMap ecm ON pc.id = ecm.categoryId
 WHERE ecm.episodeId = ?;
 
+getAllEpisodesDetails:
+SELECT
+    e.*,
+    c.title channelTitle,
+    GROUP_CONCAT(pc.name) categories
+FROM PodcastEpisodes e
+LEFT JOIN PodcastChannels c ON e.channelId = c.id
+LEFT JOIN EpisodeCategoryMap ecm ON e.id = ecm.episodeId
+LEFT JOIN PodcastCategories pc ON ecm.categoryId = pc.id
+GROUP BY e.id;
+
+-- Paginated channel queries
+-- Tag queries
+getAllSessionTags:
+SELECT DISTINCT title FROM ConferenceCategoriesTable;
+
+getAllChannelCategories:
+SELECT DISTINCT pc.name
+FROM PodcastCategories pc
+JOIN ChannelCategoryMap ccm ON pc.id = ccm.categoryId;
+
+getAllEpisodeCategories:
+SELECT DISTINCT pc.name
+FROM PodcastCategories pc
+JOIN EpisodeCategoryMap ecm ON pc.id = ecm.categoryId;
+
+-- Optimized search queries for channels
+searchChannelsPaginated:
+SELECT
+    c.id,
+    c.title,
+    c.description,
+    c.author,
+    c.imageUrl,
+    COUNT(DISTINCT e.id) AS episodeCount,
+    GROUP_CONCAT(DISTINCT pc.name) AS categories
+FROM PodcastChannels c
+LEFT JOIN PodcastEpisodes e ON e.channelId = c.id
+LEFT JOIN ChannelCategoryMap ccm ON c.id = ccm.channelId
+LEFT JOIN PodcastCategories pc ON ccm.categoryId = pc.id
+WHERE (c.title LIKE :query OR c.description LIKE :query OR c.author LIKE :query)
+AND (:hasTagFilter = 0 OR EXISTS (
+    SELECT 1
+    FROM ChannelCategoryMap cm
+    JOIN PodcastCategories cat ON cm.categoryId = cat.id
+    WHERE cm.channelId = c.id AND cat.name IN :tags
+))
+GROUP BY c.id
+ORDER BY c.title
+LIMIT :limit OFFSET :offset;
+
+countSearchChannels:
+SELECT COUNT(DISTINCT c.id)
+FROM PodcastChannels c
+LEFT JOIN ChannelCategoryMap ccm ON c.id = ccm.channelId
+LEFT JOIN PodcastCategories pc ON ccm.categoryId = pc.id
+WHERE (c.title LIKE :query OR c.description LIKE :query OR c.author LIKE :query)
+AND (:hasTagFilter = 0 OR EXISTS (
+    SELECT 1
+    FROM ChannelCategoryMap cm
+    JOIN PodcastCategories cat ON cm.categoryId = cat.id
+    WHERE cm.channelId = c.id AND cat.name IN :tags
+));
+
+-- Optimized search queries for episodes
+-- Define a more efficient query without GROUP_CONCAT
+searchEpisodesBasicPaginated:
+SELECT
+    e.id,
+    e.channelId,
+    e.title,
+    e.description,
+    e.imageUrl,
+    e.pubDate,
+    e.duration,
+    c.title AS channelTitle
+FROM PodcastEpisodes e
+JOIN PodcastChannels c ON e.channelId = c.id
+WHERE (e.title LIKE :query OR e.description LIKE :query)
+AND (:hasTagFilter = 0 OR EXISTS (
+    SELECT 1
+    FROM EpisodeCategoryMap em
+    JOIN PodcastCategories cat ON em.categoryId = cat.id
+    WHERE em.episodeId = e.id AND cat.name IN :tags
+))
+ORDER BY e.pubDate DESC
+LIMIT :limit OFFSET :offset;
+
+countSearchEpisodes:
+SELECT COUNT(DISTINCT e.id)
+FROM PodcastEpisodes e
+LEFT JOIN EpisodeCategoryMap ecm ON e.id = ecm.episodeId
+LEFT JOIN PodcastCategories pc ON ecm.categoryId = pc.id
+WHERE (e.title LIKE :query OR e.description LIKE :query)
+AND (:hasTagFilter = 0 OR EXISTS (
+    SELECT 1
+    FROM EpisodeCategoryMap em
+    JOIN PodcastCategories cat ON em.categoryId = cat.id
+    WHERE em.episodeId = e.id AND cat.name IN :tags
+));
+
+-- Pagination queries for channels and episodes
+getChannelsPaginated:
+SELECT
+    c.*,
+    COUNT(DISTINCT e.id) AS episodeCount,
+    MIN(e.pubDate) AS earliestEpisodePubDate,
+    MAX(e.pubDate) AS latestEpisodePubDate,
+    GROUP_CONCAT(DISTINCT pc.name) AS categories
+FROM PodcastChannels c
+LEFT JOIN PodcastEpisodes e ON e.channelId = c.id
+LEFT JOIN ChannelCategoryMap ccm ON c.id = ccm.channelId
+LEFT JOIN PodcastCategories pc ON ccm.categoryId = pc.id
+GROUP BY c.id
+ORDER BY c.title
+LIMIT :limit OFFSET :offset;
+
+getChannelCount:
+SELECT COUNT(*) FROM PodcastChannels;
+
+getEpisodesForChannelPaginated:
+SELECT *
+FROM PodcastEpisodes
+WHERE channelId = :channelId
+ORDER BY pubDate DESC
+LIMIT :limit OFFSET :offset;
+
+getEpisodeCountForChannel:
+SELECT COUNT(*) FROM PodcastEpisodes WHERE channelId = :channelId;
+
+-- Create indexes for better search performance
+createSearchIndexes:
+CREATE INDEX IF NOT EXISTS idx_podcast_channel_title ON PodcastChannels(title);
+CREATE INDEX IF NOT EXISTS idx_podcast_channel_desc ON PodcastChannels(description);
+CREATE INDEX IF NOT EXISTS idx_podcast_channel_author ON PodcastChannels(author);
+CREATE INDEX IF NOT EXISTS idx_podcast_episode_title ON PodcastEpisodes(title);
+CREATE INDEX IF NOT EXISTS idx_podcast_episode_desc ON PodcastEpisodes(description);
+CREATE INDEX IF NOT EXISTS idx_podcast_episode_pubdate ON PodcastEpisodes(pubDate);
+CREATE INDEX IF NOT EXISTS idx_podcast_episode_channel ON PodcastEpisodes(channelId);
+CREATE INDEX IF NOT EXISTS idx_episode_category ON EpisodeCategoryMap(episodeId);
+CREATE INDEX IF NOT EXISTS idx_channel_category ON ChannelCategoryMap(channelId);
+CREATE INDEX IF NOT EXISTS idx_session_title ON SessionTable(title);
+CREATE INDEX IF NOT EXISTS idx_session_desc ON SessionTable(description);
+
+
+-- PlayBackState Table Definition
 
 CREATE TABLE PlaybackState (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -558,3 +704,27 @@ INSERT INTO PlaybackState (
     speed,
     isBoostEnabled
 ) VALUES (?, ?, ?, ?, ?, ?);
+
+CREATE TABLE EpisodeProgress (
+  episode_id INTEGER NOT NULL PRIMARY KEY,
+  position_ms INTEGER NOT NULL,
+  last_updated INTEGER NOT NULL
+);
+
+updateEpisodeProgress:
+UPDATE EpisodeProgress
+SET position_ms = :position_ms,
+    last_updated = :last_updated
+WHERE episode_id = :episode_id;
+
+insertEpisodeProgress:
+INSERT INTO EpisodeProgress (episode_id, position_ms, last_updated)
+VALUES (:episode_id, :position_ms, :last_updated);
+
+selectEpisodeProgressById:
+SELECT episode_id, position_ms, last_updated
+FROM EpisodeProgress
+WHERE episode_id = :episode_id;
+
+selectChanges:
+SELECT changes();

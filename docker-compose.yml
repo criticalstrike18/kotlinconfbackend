@@ -22,6 +22,7 @@ services:
     # Mount the Gradle cache volume:
     volumes:
       - gradle-cache:/root/.gradle
+    restart: unless-stopped
 
   db:
     image: postgres:15
@@ -35,22 +36,24 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - app-network
+    restart: unless-stopped
 
   importService:
     image: criticalstrike/bulkimportservice:latest
     ports:
-       - "8000:8000"
+      - "8000:8000"
     environment:
-        - PORT=8000
-        - DATABASE_HOST=db
-        - DATABASE_PORT=5432
-        - DATABASE_NAME=kotlinconfg
-        - DATABASE_USER=postgres
-        - DATABASE_PASSWORD=postgres
+      - PORT=8000
+      - DATABASE_HOST=db
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=kotlinconfg
+      - DATABASE_USER=postgres
+      - DATABASE_PASSWORD=postgres
     depends_on:
       - db
     networks:
       - app-network
+    restart: unless-stopped
 
   pgadmin:
     image: dpage/pgadmin4

@@ -75,6 +75,10 @@ class PodcastService(context: ApplicationContext) {
                                 updatePlaybackState { state ->
                                     state.copy(position = pos)
                                 }
+                                val ep = _playerState.value.currentEpisode
+                                if (ep != null) {
+                                    dbStorage.updateEpisodePosition(ep.id.toLong(), pos)
+                                }
                             }
                         } catch (e: Exception) {
                             println("Polling error: ${e.message}")
@@ -165,31 +169,36 @@ class PodcastService(context: ApplicationContext) {
 
     fun play(episode: PodcastEpisode) {
         try {
-            // Launch on main thread for player operations
             mainScope.launch {
-                audioPlayer.play(episode.audioUrl)
+                // 1) Fetch any previously saved position from the DB:
+                val storedPosition = withContext(Dispatchers.Default) {
+                    dbStorage.getEpisodePosition(episode.id.toLong()) ?: 0L
+                }
+
+                // 2) Now actually prepare + start playback from that position:
+                audioPlayer.play(episode.audioUrl, startPosition = storedPosition)
                 isInitialized = true
 
-                // Get duration on main thread
                 val duration = audioPlayer.getDuration()
 
-                // Switch to background thread for database operations
+                // 3) Update your in-memory state objects
                 withContext(Dispatchers.Default) {
                     val channel = getChannelById(episode.channelId)
                     updatePlayerState { state ->
                         state.copy(
                             isPlaying = true,
                             currentEpisode = episode,
-                            currentPosition = 0,
+                            currentPosition = storedPosition,
                             duration = duration,
                             currentChannel = channel
                         )
                     }
+                    // Also update your stored “last” playback state if you wish
                     stateManager.updateState(
                         PodcastPlaybackState(
                             episodeId = episode.id,
                             channelId = episode.channelId,
-                            position = 0,
+                            position = storedPosition,
                             url = episode.audioUrl,
                             speed = 1.0,
                             isBoostEnabled = false
@@ -242,6 +251,7 @@ class PodcastService(context: ApplicationContext) {
             withContext(Dispatchers.Default) {
                 updatePlayerState { it.copy(currentPosition = position) }
                 updatePlaybackState { it.copy(position = position) }
+                stateManager.saveCurrentState()
             }
         }
     }

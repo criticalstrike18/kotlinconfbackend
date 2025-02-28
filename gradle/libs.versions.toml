@@ -32,6 +32,7 @@ androidx-navigation = "2.7.0-alpha04"
 sqldelight = "2.0.1"
 media3 = "1.5.1"
 composeIcons = "1.1.1"
+kotlinx-serialization = "1.8.0"
 [libraries]
 
 # Exposed
@@ -89,6 +90,8 @@ ktor-server-netty = { module = "io.ktor:ktor-server-netty", version.ref="ktor" }
 ktor-server-partial-content = { module = "io.ktor:ktor-server-partial-content", version.ref="ktor" }
 ktor-server-status-pages = { module = "io.ktor:ktor-server-status-pages", version.ref="ktor" }
 ktor-server-swagger = { module = "io.ktor:ktor-server-swagger", version.ref="ktor" }
+#ktor-protobuff
+ktor-serialization-protobuf = {module = "io.ktor:ktor-serialization-kotlinx-protobuf", version.ref="ktor"}
 
 # utility
 kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinx-datetime" }
@@ -109,10 +112,13 @@ media3-exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = 
 media3-ui = { module = "androidx.media3:media3-ui", version.ref = "media3" }
 media3-session = { module = "androidx.media3:media3-session", version.ref = "media3" }
 
+#Compose-Icons
 composeIcons-feather = { module = "br.com.devsrsouza.compose.icons:feather", version.ref = "composeIcons" }
 composeIcons-fontAwesome = { module = "br.com.devsrsouza.compose.icons:simple-icons", version.ref = "composeIcons" }
 
-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended", version = "1.5.0" }
+#Kotlinx-Serialization-ProtoBuff
+kotlinx-serialization-core = { module = "org.jetbrains.kotlinx:kotlinx-serialization-core", version.ref = "kotlinx-serialization" }
+kotlinx-serialization-protobuf = { module = "org.jetbrains.kotlinx:kotlinx-serialization-protobuf", version.ref = "kotlinx-serialization" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

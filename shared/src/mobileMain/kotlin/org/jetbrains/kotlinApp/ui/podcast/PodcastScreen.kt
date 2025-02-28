@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Icon
+import androidx.compose.material.LinearProgressIndicator
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
@@ -38,6 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,6 +52,7 @@ import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.kotlinApp.ConferenceService
+import org.jetbrains.kotlinApp.DatabaseStorage
 import org.jetbrains.kotlinApp.podcast.PlayerState
 import org.jetbrains.kotlinApp.podcast.PodcastEpisode
 import org.jetbrains.kotlinApp.podcast.PodcastPlaybackState
@@ -157,6 +160,7 @@ fun PodcastScreen(
                             episode = episode,
                             episodeNumber = currentChannelEpisodes.size - currentChannelEpisodes.indexOf(episode),
                             isPlaying = isCurrentEpisode && playerState.isPlaying,
+                            database = service.dbStorage,
                             onClick = { onPlayPause(episode) }
                         )
                     }
@@ -312,9 +316,19 @@ private fun EpisodeListItem(
     episode: PodcastEpisode,
     episodeNumber: Int,
     isPlaying: Boolean,
+    database: DatabaseStorage,
     onClick: () -> Unit
 ) {
     val screenSizeIsTooWide = Screen.isTooWide()
+    val episodePosFlow = remember(episode.id) {
+        database.getEpisodePositionFlow(episode.id.toLong())
+    }
+    val positionMs by episodePosFlow.collectAsState(initial = 0L)
+
+    // 2) Compute fraction for the progress indicator:
+    val fractionPlayed = if (episode.duration > 0) {
+        (positionMs?.toFloat() ?: 0f) / (episode.duration * 1000).toFloat()
+    } else 0f
     HDivider()
     Row(
         modifier = Modifier
@@ -390,6 +404,16 @@ private fun EpisodeListItem(
                 style = MaterialTheme.typography.caption,
                 color = MaterialTheme.colors.greyGrey20
             )
+            if (fractionPlayed > 0f && fractionPlayed < 1f) {
+                LinearProgressIndicator(
+                    progress = fractionPlayed,
+                    modifier = Modifier
+                        .width(30.dp)
+                        .padding(top = 4.dp),
+                    color = Color.Red, // ignore the theme color for now
+                    backgroundColor = Color.LightGray,
+                )
+            }
         }
     }
 }

@@ -90,10 +90,10 @@ fun MenuScreen(controller: AppController) {
                     }
                     HDivider()
                     MenuItem(
-                        text = stringResource(Res.string.code_of_conduct),
+                        text = "Request Podcast",
                         icon = Res.drawable.arrow_right
                     ) {
-                        controller.showCodeOfConduct()
+                        controller.showPodcastRequestForm()
                     }
                 }
             }

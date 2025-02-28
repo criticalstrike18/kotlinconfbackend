@@ -34,6 +34,7 @@ class SyncManager(
 
         // Start periodic background sync
         syncJob = scope.launch(Dispatchers.IO) {
+            launch { handlePodcastSync() }
             launch { handleVoteSync() }
             launch { handleFeedbackSync() }
             launch { handleFavoriteSync() }
@@ -41,7 +42,6 @@ class SyncManager(
             launch { handleSpeakerSync() }
             launch { handleRoomSync() }
             launch { handleCategorySync() }
-            launch { handlePodcastSync() }
 
             while (isActive) {
                 try {
@@ -242,57 +242,19 @@ class SyncManager(
     }
 
     private suspend fun handlePodcastSync() {
-        try {
-            // Call the API client to fetch the podcast data.
-            val podcastsData: List<ChannelFullData> = client.getPodcastsData()
-            println("podcast: ${podcastsData.count()}")
-            // Iterate over each channel.
-            podcastsData.forEach { channel ->
-                // Upsert the channel.
-                // Assume that dbStorage.upsertPodcastChannel accepts a ChannelDTO.
-                dbStorage.upsertChannelData(
-                    ChannelFullData(
-                        id = channel.id,
-                        title = channel.title,
-                        link = channel.link,
-                        description = channel.description,
-                        copyright = channel.copyright,
-                        language = channel.language ?: "",
-                        author = channel.author ?: "",
-                        ownerEmail = channel.ownerEmail ?: "",
-                        ownerName = channel.ownerName ?: "",
-                        imageUrl = channel.imageUrl ?: "",
-                        // Convert the ISO-8601 date string to a timestamp (Long).
-                        lastBuildDate = parseDate(channel.lastBuildDate)
-                    )
-                )
-                // Now iterate over each episode for the channel.
-                channel.episodes.forEach { episode ->
-                    // Upsert the episode. (We assume the upsert function looks up by GUID.)
-                    dbStorage.upsertEpisodeData(
-                        channel.id,
-                        EpisodeData(
-                            // If your API does not return a numeric id for episodes, you can pass 0 (or have your upsert ignore it).
-                            id = episode.id,
-                            guid = episode.guid,
-                            title = episode.title,
-                            description = episode.description,
-                            link = episode.link,
-                            pubDate = episode.pubDate,
-                            duration = episode.duration ?: 0,
-                            explicit = episode.explicit,
-                            imageUrl = episode.imageUrl,
-                            mediaUrl = episode.mediaUrl ?: "",
-                            mediaType = episode.mediaType ?: "audio/mpeg",
-                            mediaLength = episode.mediaLength ?: 0
-                        )
-                    )
-                }
-            }
-            println("Podcast sync completed successfully")
-        } catch (e: Exception) {
-            println("Podcast sync failed: ${e.message}")
-        }
+//        try {
+//            // Fetch data using ProtoBuf from your API
+//            val podcastsData: List<ChannelFullData> = client.getPodcastsData()
+//            println("Fetched ${podcastsData.count()} podcasts from server")
+//
+//            // Use batch insert
+//            dbStorage.syncPodcastData(podcastsData)
+//
+//            println("Podcast sync completed successfully")
+//        } catch (e: Exception) {
+//            println("Podcast sync failed: ${e.message}")
+//            e.printStackTrace()
+//        }
     }
 
     private fun parseDate(dateStr: String?): String {

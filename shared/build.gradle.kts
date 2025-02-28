@@ -54,13 +54,20 @@ kotlin {
                 api(libs.ktor.serialization.kotlinx.json)
                 api(libs.ktor.client.content.negotiation)
                 api(libs.ktor.utils)
+//              Protobuf-ktor
+                api(libs.ktor.serialization.protobuf)
 
                 implementation(libs.kotlinx.datetime)
                 implementation(libs.material3)
 
                 implementation(libs.sqldelite.coroutines)
+
                 implementation(libs.composeIcons.feather)
                 implementation(libs.composeIcons.fontAwesome)
+
+                implementation(libs.kotlinx.serialization.core)
+                implementation(libs.kotlinx.serialization.protobuf)
+                implementation("com.powersync:core:1.0.0-BETA26")
 
             }
         }

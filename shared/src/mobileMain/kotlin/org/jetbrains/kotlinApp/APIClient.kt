@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalSerializationApi::class)
+
 package org.jetbrains.kotlinApp
 
 import io.ktor.client.*
@@ -9,8 +11,10 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
+import io.ktor.serialization.kotlinx.protobuf.protobuf
 import io.ktor.util.date.*
 import io.ktor.utils.io.core.*
+import kotlinx.serialization.ExperimentalSerializationApi
 import org.jetbrains.kotlinApp.utils.appLogger
 
 val HTTP_CLIENT = HttpClient()
@@ -26,6 +30,7 @@ class APIClient(
     private val client = HTTP_CLIENT.config {
         install(ContentNegotiation) {
             json()
+            protobuf()
         }
 
         install(Logging) {
@@ -212,8 +217,20 @@ class APIClient(
         if (userUuid == null) return emptyList()
         return client.get {
             apiUrl("/podcast/all")
+            accept(ContentType.Application.ProtoBuf)
         }.body()
 
+    }
+
+    suspend fun sendPodcastRequest(title: String, author: String, rssLink: String): Boolean {
+        if (userUuid == null) return false
+
+        client.post {
+            apiUrl("/podcast/sendRequest")
+            json()
+            setBody(PodcastQueryInfo(title,author,rssLink))
+        }
+        return true
     }
 
     /**
