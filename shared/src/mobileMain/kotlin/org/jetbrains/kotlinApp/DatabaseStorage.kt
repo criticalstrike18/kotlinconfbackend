@@ -17,12 +17,13 @@ import org.jetbrains.kotlinApp.podcast.PodcastEpisode
 import org.jetbrains.kotlinApp.podcast.PodcastPlaybackState
 import org.jetbrains.kotlinApp.storage.ApplicationStorage
 import org.jetbrains.kotlinconf.GetAllChannelDetails
-import org.jetbrains.kotlinconf.GetAllEpisodesDetails
 import org.jetbrains.kotlinconf.GetChannelsPaginated
+import org.jetbrains.kotlinconf.GetChannelsWithFilters
 import org.jetbrains.kotlinconf.PodcastChannels
 import org.jetbrains.kotlinconf.PodcastEpisodes
 import org.jetbrains.kotlinconf.SearchChannelsPaginated
 import org.jetbrains.kotlinconf.SearchEpisodesBasicPaginated
+import org.jetbrains.kotlinconf.SearchEpisodesByCategory
 
 class DatabaseStorage(
     private val database: SessionDatabase,
@@ -49,36 +50,6 @@ class DatabaseStorage(
 
     override fun getString(key: String): String? {
         TODO("Not yet implemented")
-    }
-
-    suspend fun savePlaybackState(state: PodcastPlaybackState) = withContext(dbDispatcher) {
-        dbMutex.withLock {
-            database.transaction {
-                database.sessionDatabaseQueries.insertPlaybackState(
-                    episodeId = state.episodeId,
-                    channelId = state.channelId,
-                    position = state.position,
-                    url = state.url,
-                    speed = state.speed,
-                    isBoostEnabled = if (state.isBoostEnabled) 1L else 0L
-                )
-            }
-        }
-    }
-
-    suspend fun loadPlaybackState(): PodcastPlaybackState? = withContext(Dispatchers.IO) {
-        database.sessionDatabaseQueries.selectLastPlaybackState()
-            .executeAsOneOrNull()
-            ?.let { row ->
-                PodcastPlaybackState(
-                    episodeId = row.episodeId,
-                    channelId = row.channelId,
-                    position = row.position,
-                    url = row.url,
-                    speed = row.speed,
-                    isBoostEnabled = row.isBoostEnabled == 1L
-                )
-            }
     }
 
     suspend fun getConferenceData(): Conference = withContext(Dispatchers.IO) {
@@ -613,13 +584,12 @@ class DatabaseStorage(
 //    PODCAST MANAGEMENT
 private suspend fun upsertChannelData(channelData: ChannelFullData) = withContext(Dispatchers.IO) {
     database.transaction {
-        // First handle the channel itself
+        // Handle the channel itself
         val existing = database.sessionDatabaseQueries
             .selectChannelById(channelData.id.toLong())
             .executeAsOneOrNull()
 
         if (existing == null) {
-            // Insert channel
             database.sessionDatabaseQueries.insertChannel(
                 id = channelData.id.toLong(),
                 title = channelData.title,
@@ -634,7 +604,6 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
                 lastBuildDate = parseDateString(channelData.lastBuildDate)
             )
         } else {
-            // Update channel
             database.sessionDatabaseQueries.updateChannel(
                 title = channelData.title,
                 link = channelData.link,
@@ -650,19 +619,14 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
             )
         }
 
-        // Handle categories
+        // Handle channel categories
         channelData.categories.forEach { categoryName ->
-            // Insert category if it doesn't exist
-            database.sessionDatabaseQueries.insertPodcastCategory(categoryName)
-
-            // Get category ID
+            database.sessionDatabaseQueries.insertChannelCategory(categoryName)
             val categoryId = database.sessionDatabaseQueries
-                .selectPodcastCategoryByName(categoryName)
+                .selectChannelCategoryByName(categoryName)
                 .executeAsOne()
                 .id
-
-            // Map category to channel
-            database.sessionDatabaseQueries.insertChannelCategory(
+            database.sessionDatabaseQueries.insertChannelCategoryMap(
                 channelId = channelData.id.toLong(),
                 categoryId = categoryId
             )
@@ -673,7 +637,7 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
     /** Upsert or insert an episode. */
     private suspend fun upsertEpisodeData(channelId: Int, episodeData: EpisodeData) = withContext(Dispatchers.IO) {
         database.transaction {
-            // First handle the episode itself
+            // Handle the episode itself
             val existing = episodeData.id?.let {
                 database.sessionDatabaseQueries
                     .selectEpisodesById(it.toLong())
@@ -681,7 +645,6 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
             }
 
             if (existing == null) {
-                // Insert episode
                 database.sessionDatabaseQueries.insertEpisode(
                     id = episodeData.id?.toLong(),
                     channelId = channelId.toLong(),
@@ -698,7 +661,6 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
                     mediaLength = episodeData.mediaLength ?: 0
                 )
             } else {
-                // Update episode
                 database.sessionDatabaseQueries.updateEpisode(
                     channelId = channelId.toLong(),
                     guid = episodeData.guid,
@@ -718,17 +680,12 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
 
             // Handle episode categories
             episodeData.episodeCategory.forEach { categoryName ->
-                // Insert category if it doesn't exist
-                database.sessionDatabaseQueries.insertPodcastCategory(categoryName)
-
-                // Get category ID
+                database.sessionDatabaseQueries.insertEpisodeCategory(categoryName)
                 val categoryId = database.sessionDatabaseQueries
-                    .selectPodcastCategoryByName(categoryName)
+                    .selectEpisodeCategoryByName(categoryName)
                     .executeAsOne()
                     .id
-
-                // Map category to episode
-                database.sessionDatabaseQueries.insertEpisodeCategory(
+                database.sessionDatabaseQueries.insertEpisodeCategoryMap(
                     episodeId = episodeData.id!!.toLong(),
                     categoryId = categoryId
                 )
@@ -737,7 +694,7 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
     }
 
 
-    suspend fun insertPodcastChannels(dto: ChannelDTO)= withContext(Dispatchers.IO){
+    suspend fun insertPodcastChannels(dto: ChannelDTO) = withContext(Dispatchers.IO) {
         database.transaction {
             database.sessionDatabaseQueries.insertChannel(
                 id = dto.id.toLong(),
@@ -755,7 +712,7 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
         }
     }
 
-    suspend fun insertPodcastEpisodes(dto: EpisodeDTO)= withContext(Dispatchers.IO){
+    suspend fun insertPodcastEpisodes(dto: EpisodeDTO) = withContext(Dispatchers.IO) {
         database.transaction {
             database.sessionDatabaseQueries.insertEpisode(
                 id = dto.id.toLong(),
@@ -777,135 +734,162 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
 
     suspend fun syncPodcastData(podcastsData: List<ChannelFullData>) = withContext(Dispatchers.IO) {
         try {
-                podcastsData.forEach { channel ->
-                    // Sync channel and its categories
-                    upsertChannelData(channel)
-
-                    // Sync all episodes and their categories in batches
-                    val batchSize = 10
-                    channel.episodes.chunked(batchSize).forEach { episodeBatch ->
-                        episodeBatch.forEach { episode ->
-                            upsertEpisodeData(channel.id, episode)
-                        }
+            podcastsData.forEach { channel ->
+                upsertChannelData(channel)
+                val batchSize = 10
+                channel.episodes.chunked(batchSize).forEach { episodeBatch ->
+                    episodeBatch.forEach { episode ->
+                        upsertEpisodeData(channel.id, episode)
                     }
                 }
+            }
         } catch (e: Exception) {
             println("Error syncing podcast data: ${e.message}")
             throw e
         }
     }
 
+
+
     suspend fun syncPodcastDataBatch(podcastsData: List<ChannelFullData>) = withContext(Dispatchers.IO) {
-        // Process in smaller chunks to keep each transaction short
-         dbMutex.withLock {
-             podcastsData.chunked(50).forEach { chunk ->
-                 // Use a single transaction per chunk
-                 database.transaction {
-                     chunk.forEach { channel ->
-                         // Upsert channel
-                         val existingChannel = database.sessionDatabaseQueries
-                             .selectChannelById(channel.id.toLong())
-                             .executeAsOneOrNull()
+        dbMutex.withLock {
+            podcastsData.chunked(50).forEach { chunk ->
+                database.transaction {
+                    chunk.forEach { channel ->
+                        // Upsert channel
+                        val existingChannel = database.sessionDatabaseQueries
+                            .selectChannelById(channel.id.toLong())
+                            .executeAsOneOrNull()
 
-                         if (existingChannel == null) {
-                             database.sessionDatabaseQueries.insertChannel(
-                                 id = channel.id.toLong(),
-                                 title = channel.title,
-                                 link = channel.link,
-                                 description = channel.description,
-                                 copyright = channel.copyright,
-                                 language = channel.language ?: "",
-                                 author = channel.author ?: "",
-                                 ownerEmail = channel.ownerEmail ?: "",
-                                 ownerName = channel.ownerName ?: "",
-                                 imageUrl = channel.imageUrl ?: "",
-                                 lastBuildDate = parseDateString(channel.lastBuildDate)
-                             )
-                         } else {
-                             database.sessionDatabaseQueries.updateChannel(
-                                 title = channel.title,
-                                 link = channel.link,
-                                 description = channel.description,
-                                 copyright = channel.copyright,
-                                 language = channel.language ?: "",
-                                 author = channel.author ?: "",
-                                 ownerEmail = channel.ownerEmail ?: "",
-                                 ownerName = channel.ownerName ?: "",
-                                 imageUrl = channel.imageUrl ?: "",
-                                 lastBuildDate = parseDateString(channel.lastBuildDate),
-                                 id = channel.id.toLong()
-                             )
-                         }
+                        if (existingChannel == null) {
+                            database.sessionDatabaseQueries.insertChannel(
+                                id = channel.id.toLong(),
+                                title = channel.title,
+                                link = channel.link,
+                                description = channel.description,
+                                copyright = channel.copyright,
+                                language = channel.language ?: "",
+                                author = channel.author ?: "",
+                                ownerEmail = channel.ownerEmail ?: "",
+                                ownerName = channel.ownerName ?: "",
+                                imageUrl = channel.imageUrl ?: "",
+                                lastBuildDate = parseDateString(channel.lastBuildDate)
+                            )
+                        } else {
+                            database.sessionDatabaseQueries.updateChannel(
+                                title = channel.title,
+                                link = channel.link,
+                                description = channel.description,
+                                copyright = channel.copyright,
+                                language = channel.language ?: "",
+                                author = channel.author ?: "",
+                                ownerEmail = channel.ownerEmail ?: "",
+                                ownerName = channel.ownerName ?: "",
+                                imageUrl = channel.imageUrl ?: "",
+                                lastBuildDate = parseDateString(channel.lastBuildDate),
+                                id = channel.id.toLong()
+                            )
+                        }
 
-                         // Upsert channel categories
-                         channel.categories.forEach { categoryName ->
-                             database.sessionDatabaseQueries.insertPodcastCategory(categoryName)
-                             val categoryId = database.sessionDatabaseQueries
-                                 .selectPodcastCategoryByName(categoryName)
-                                 .executeAsOne().id
-                             database.sessionDatabaseQueries.insertChannelCategory(
-                                 channelId = channel.id.toLong(),
-                                 categoryId = categoryId
-                             )
-                         }
+                        // Upsert channel categories
+                        channel.categories.forEach { categoryName ->
+                            database.sessionDatabaseQueries.insertChannelCategory(categoryName)
+                            val categoryId = database.sessionDatabaseQueries
+                                .selectChannelCategoryByName(categoryName)
+                                .executeAsOne().id
+                            database.sessionDatabaseQueries.insertChannelCategoryMap(
+                                channelId = channel.id.toLong(),
+                                categoryId = categoryId
+                            )
+                        }
 
-                         // Upsert episodes for this channel
-                         channel.episodes.forEach { episode ->
-                             val existingEpisode = episode.id?.let {
-                                 database.sessionDatabaseQueries
-                                     .selectEpisodesById(it.toLong())
-                                     .executeAsOneOrNull()
-                             }
-                             if (existingEpisode == null) {
-                                 database.sessionDatabaseQueries.insertEpisode(
-                                     id = episode.id?.toLong(),
-                                     channelId = channel.id.toLong(),
-                                     guid = episode.guid,
-                                     title = episode.title,
-                                     description = episode.description,
-                                     link = episode.link,
-                                     pubDate = episode.pubDate.toEpochMilliseconds(),
-                                     duration = (episode.duration ?: 0).toLong(),
-                                     explicit = if (episode.explicit) 1L else 0L,
-                                     imageUrl = episode.imageUrl,
-                                     mediaUrl = episode.mediaUrl ?: "",
-                                     mediaType = episode.mediaType ?: "audio/mpeg",
-                                     mediaLength = episode.mediaLength ?: 0
-                                 )
-                             } else {
-                                 database.sessionDatabaseQueries.updateEpisode(
-                                     channelId = channel.id.toLong(),
-                                     guid = episode.guid,
-                                     title = episode.title,
-                                     description = episode.description,
-                                     link = episode.link,
-                                     pubDate = episode.pubDate.toEpochMilliseconds(),
-                                     duration = (episode.duration ?: 0).toLong(),
-                                     explicit = if (episode.explicit) 1L else 0L,
-                                     imageUrl = episode.imageUrl,
-                                     mediaUrl = episode.mediaUrl ?: "",
-                                     mediaType = episode.mediaType ?: "audio/mpeg",
-                                     mediaLength = episode.mediaLength ?: 0,
-                                     id = existingEpisode.id
-                                 )
-                             }
+                        // Upsert episodes
+                        channel.episodes.forEach { episode ->
+                            val existingEpisode = episode.id?.let {
+                                database.sessionDatabaseQueries
+                                    .selectEpisodesById(it.toLong())
+                                    .executeAsOneOrNull()
+                            }
+                            if (existingEpisode == null) {
+                                database.sessionDatabaseQueries.insertEpisode(
+                                    id = episode.id?.toLong(),
+                                    channelId = channel.id.toLong(),
+                                    guid = episode.guid,
+                                    title = episode.title,
+                                    description = episode.description,
+                                    link = episode.link,
+                                    pubDate = episode.pubDate.toEpochMilliseconds(),
+                                    duration = (episode.duration ?: 0).toLong(),
+                                    explicit = if (episode.explicit) 1L else 0L,
+                                    imageUrl = episode.imageUrl,
+                                    mediaUrl = episode.mediaUrl ?: "",
+                                    mediaType = episode.mediaType ?: "audio/mpeg",
+                                    mediaLength = episode.mediaLength ?: 0
+                                )
+                            } else {
+                                database.sessionDatabaseQueries.updateEpisode(
+                                    channelId = channel.id.toLong(),
+                                    guid = episode.guid,
+                                    title = episode.title,
+                                    description = episode.description,
+                                    link = episode.link,
+                                    pubDate = episode.pubDate.toEpochMilliseconds(),
+                                    duration = (episode.duration ?: 0).toLong(),
+                                    explicit = if (episode.explicit) 1L else 0L,
+                                    imageUrl = episode.imageUrl,
+                                    mediaUrl = episode.mediaUrl ?: "",
+                                    mediaType = episode.mediaType ?: "audio/mpeg",
+                                    mediaLength = episode.mediaLength ?: 0,
+                                    id = existingEpisode.id
+                                )
+                            }
 
-                             // Upsert episode categories
-                             episode.episodeCategory.forEach { categoryName ->
-                                 database.sessionDatabaseQueries.insertPodcastCategory(categoryName)
-                                 val categoryId = database.sessionDatabaseQueries
-                                     .selectPodcastCategoryByName(categoryName)
-                                     .executeAsOne().id
-                                 database.sessionDatabaseQueries.insertEpisodeCategory(
-                                     episodeId = episode.id!!.toLong(),
-                                     categoryId = categoryId
-                                 )
-                             }
-                         }
-                     }
-                 }
-             }
-         }
+                            // Upsert episode categories
+                            episode.episodeCategory.forEach { categoryName ->
+                                database.sessionDatabaseQueries.insertEpisodeCategory(categoryName)
+                                val categoryId = database.sessionDatabaseQueries
+                                    .selectEpisodeCategoryByName(categoryName)
+                                    .executeAsOne().id
+                                database.sessionDatabaseQueries.insertEpisodeCategoryMap(
+                                    episodeId = episode.id!!.toLong(),
+                                    categoryId = categoryId
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun savePlaybackState(state: PodcastPlaybackState) = withContext(Dispatchers.IO) {
+        dbMutex.withLock {
+            database.transaction {
+                database.sessionDatabaseQueries.insertPlaybackState(
+                    episodeId = state.episodeId,
+                    channelId = state.channelId,
+                    position = state.position,
+                    url = state.url,
+                    speed = state.speed,
+                    isBoostEnabled = if (state.isBoostEnabled) 1L else 0L
+                )
+            }
+        }
+    }
+
+    suspend fun loadPlaybackState(): PodcastPlaybackState? = withContext(Dispatchers.IO) {
+        database.sessionDatabaseQueries.selectLastPlaybackState()
+            .executeAsOneOrNull()
+            ?.let { row ->
+                PodcastPlaybackState(
+                    episodeId = row.episodeId,
+                    channelId = row.channelId,
+                    position = row.position,
+                    url = row.url,
+                    speed = row.speed,
+                    isBoostEnabled = row.isBoostEnabled == 1L
+                )
+            }
     }
 
     suspend fun updateEpisodePosition(episodeId: Long, newPosition: Long) = withContext(Dispatchers.IO) {
@@ -933,11 +917,6 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
         }
     }
 
-    fun getAllChannelsFlow(): Flow<List<GetAllChannelDetails>> {
-        return database.sessionDatabaseQueries.getAllChannelDetails()
-            .asFlow()
-            .mapToList(Dispatchers.Default)
-    }
 
     fun getEpisodesForChannelFlow(channelId: Long): Flow<List<PodcastEpisodes>> {
         return database.sessionDatabaseQueries.selectEpisodesByChannelId(channelId)
@@ -945,12 +924,6 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
             .mapToList(Dispatchers.Default)
     }
 
-    fun getAllEpisodesWithCategoriesFlow(): Flow<List<GetAllEpisodesDetails>> {
-        return database.sessionDatabaseQueries
-            .getAllEpisodesDetails()
-            .asFlow()
-            .mapToList(Dispatchers.IO)
-    }
 
     fun getEpisodeByIdFlow(episodeId: Long): Flow<PodcastEpisode> {
         return database.sessionDatabaseQueries
@@ -974,12 +947,6 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
     fun getChannelByIdFlow(channelId: Long): Flow<PodcastChannels> {
         return database.sessionDatabaseQueries
             .selectChannelById(channelId)
-            .asFlow()
-            .mapToOne(Dispatchers.IO)
-    }
-
-    fun getChannelByEpisodeIdFlow(episodeId: Long): Flow<PodcastChannels> {
-        return database.sessionDatabaseQueries.selectChannelByEpisodeId(episodeId)
             .asFlow()
             .mapToOne(Dispatchers.IO)
     }
@@ -1141,6 +1108,158 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
         ).executeAsOne()
     }
 
+    /** * Get channels with cursor-based pagination */
+    suspend fun getChannelsList(cursor: Long? = null, limit: Int = 20): List<GetAllChannelDetails> =
+        withContext(Dispatchers.IO) {
+            dbMutex.withLock {
+                try {
+                    database.sessionDatabaseQueries.getChannelsCursor(
+                        cursor = cursor,
+                        limit = limit.toLong(),
+                        mapper = { id, title, link, description, copyright, language, author,
+                                   ownerEmail, ownerName, imageUrl, lastBuildDate, episodeCount,
+                                   earliestEpisodePubDate, latestEpisodePubDate, categories ->
+                            GetAllChannelDetails(id, title, link, description, copyright, language,
+                                author, ownerEmail, ownerName, imageUrl, lastBuildDate,
+                                episodeCount, earliestEpisodePubDate,
+                                latestEpisodePubDate, categories)
+                        }
+                    ).executeAsList()
+                } catch (e: Exception) {
+                    println("Database error in getChannelsList: ${e.message}")
+                    emptyList()
+                }
+            }
+        }
+
+    suspend fun getChannelsListBackward(cursor: Long, limit: Int = 20): List<GetAllChannelDetails> =
+        withContext(Dispatchers.IO) {
+            dbMutex.withLock {
+                try {
+                    database.sessionDatabaseQueries.getChannelsCursorBackward(
+                        cursor = cursor,
+                        limit = limit.toLong(),
+                        mapper = { id, title, link, description, copyright, language, author,
+                                   ownerEmail, ownerName, imageUrl, lastBuildDate, episodeCount,
+                                   earliestEpisodePubDate, latestEpisodePubDate, categories ->
+                            GetAllChannelDetails(id, title, link, description, copyright, language,
+                                author, ownerEmail, ownerName, imageUrl, lastBuildDate,
+                                episodeCount, earliestEpisodePubDate,
+                                latestEpisodePubDate, categories)
+                        }
+                    ).executeAsList()
+                } catch (e: Exception) {
+                    println("Database error in getChannelsListBackward: ${e.message}")
+                    emptyList()
+                }
+            }
+        }
+
+    /** * Get episodes with cursor-based pagination */
+    fun getEpisodesForChannelCursor(
+        channelId: Long,
+        cursor: Long? = null,
+        limit: Int = 20
+    ): Flow<List<PodcastEpisodes>> {
+        return database.sessionDatabaseQueries.getEpisodesForChannelCursor(
+            channelId = channelId,
+            cursor = cursor,
+            limit = limit.toLong(),
+            mapper = { id, channelId_, guid, title, description, link, pubDate, duration, explicit, imageUrl, mediaUrl, mediaType, mediaLength ->
+                PodcastEpisodes(id, channelId_, guid, title, description, link, pubDate, duration, explicit, imageUrl, mediaUrl, mediaType, mediaLength)
+            }
+        )
+            .asFlow()
+            .mapToList(Dispatchers.IO)
+    }
+
+    /** * Get episodes with cursor-based pagination (backward) */
+    fun getEpisodesForChannelCursorBackward(
+        channelId: Long,
+        cursor: Long,
+        limit: Int = 20
+    ): Flow<List<PodcastEpisodes>> {
+        return database.sessionDatabaseQueries.getEpisodesForChannelCursorBackward(
+            channelId = channelId,
+            cursor = cursor,
+            limit = limit.toLong(),
+            mapper = { id, channelId_, guid, title, description, link, pubDate, duration, explicit, imageUrl, mediaUrl, mediaType, mediaLength ->
+                PodcastEpisodes(id, channelId_, guid, title, description, link, pubDate, duration, explicit, imageUrl, mediaUrl, mediaType, mediaLength)
+            }
+        )
+            .asFlow()
+            .mapToList(Dispatchers.IO)
+    }
+
+    suspend fun getChannelIdsByTags(tags: List<String>): List<Long> = withContext(Dispatchers.IO) {
+        if (tags.isEmpty()) return@withContext emptyList()
+
+        try {
+            database.sessionDatabaseQueries.getChannelIdsByTags(tags).executeAsList()
+        } catch (e: Exception) {
+            println("Error getting channel IDs by tags: ${e.message}")
+            emptyList()
+        }
+    }
+
+    suspend fun getChannelsWithFilters(
+        tags: List<String>,
+        query: String?,
+        cursor: Long?,
+        limit: Long,
+        backward: Long
+    ): List<GetChannelsWithFilters> = withContext(Dispatchers.IO) {
+        try {
+            database.sessionDatabaseQueries.getChannelsWithFilters(
+                useTagFilter = if (tags.isEmpty()) 0L else 1L,
+                tags = tags,
+                useTextFilter = if (query.isNullOrBlank()) 0L else 1L,
+                query = query ?: "",
+                cursor = cursor,
+                limit = limit,
+                backward = backward
+            ).executeAsList()
+        } catch (e: Exception) {
+            println("Error getting channels with filters: ${e.message}")
+            emptyList()
+        }
+    }
+
+    suspend fun getEpisodeIdsByTags(tags: List<String>): List<Long> = withContext(Dispatchers.IO) {
+        if (tags.isEmpty()) return@withContext emptyList()
+
+        try {
+            database.sessionDatabaseQueries.getEpisodeIdsByTags(tags).executeAsList()
+        } catch (e: Exception) {
+            println("Error getting episode IDs by tags: ${e.message}")
+            emptyList()
+        }
+    }
+
+    // In DatabaseStorage.kt
+    suspend fun searchEpisodesByCategory(
+        query: String,
+        tags: List<String>,
+        cursor: Long?,
+        limit: Long,
+        backward: Long
+    ): List<SearchEpisodesByCategory> = withContext(Dispatchers.IO) {
+        dbMutex.withLock {
+            try {
+                database.sessionDatabaseQueries.searchEpisodesByCategory(
+                    query = query,
+                    hasTagFilter = if (tags.isEmpty()) 0L else 1L,
+                    tags = tags,
+                    cursor = cursor,
+                    backward = backward,
+                    limit = limit
+                ).executeAsList()
+            } catch (e: Exception) {
+                println("Error searching episodes by category: ${e.message}")
+                emptyList()
+            }
+        }
+    }
 }
 
     fun parseDateString(dateString: String?): Long {

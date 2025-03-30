@@ -77,7 +77,7 @@ class APIClient(
     }
 
     /**
-     * Get [ConferenceData] info
+     * Get ConferenceData info
      */
     suspend fun downloadConferenceData(): Conference = client.get {
         url.path("conference")

@@ -2,6 +2,7 @@
 
 package org.jetbrains.kotlinApp.ui
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -12,11 +13,13 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.CircularProgressIndicator
@@ -33,14 +36,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import kotlinconfapp.shared.generated.resources.Res
@@ -48,38 +51,31 @@ import kotlinconfapp.shared.generated.resources.back
 import kotlinconfapp.shared.generated.resources.episode
 import kotlinconfapp.shared.generated.resources.podcast
 import kotlinconfapp.shared.generated.resources.session
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.kotlinApp.AppController
-import org.jetbrains.kotlinApp.ConferenceService
 import org.jetbrains.kotlinApp.EpisodeSearchItem
 import org.jetbrains.kotlinApp.PodcastChannelSearchItem
-import org.jetbrains.kotlinApp.SessionCardView
 import org.jetbrains.kotlinApp.SessionSearchItem
-import org.jetbrains.kotlinApp.Speaker
-import org.jetbrains.kotlinApp.podcast.PaginatedResult
 import org.jetbrains.kotlinApp.ui.components.AsyncImage
 import org.jetbrains.kotlinApp.ui.components.SearchField
 import org.jetbrains.kotlinApp.ui.components.SearchSessionTags
 import org.jetbrains.kotlinApp.ui.components.Tab
 import org.jetbrains.kotlinApp.ui.components.TabBar
-import org.jetbrains.kotlinApp.ui.components.TabButton
 import org.jetbrains.kotlinApp.ui.components.Tag
 import org.jetbrains.kotlinApp.ui.theme.blackWhite
 import org.jetbrains.kotlinApp.ui.theme.grey50
 import org.jetbrains.kotlinApp.ui.theme.grey5Black
 import org.jetbrains.kotlinApp.ui.theme.grey80Grey20
 import org.jetbrains.kotlinApp.ui.theme.greyGrey5
-import org.jetbrains.kotlinApp.ui.theme.greyGrey50
 import org.jetbrains.kotlinApp.ui.theme.orange
 import org.jetbrains.kotlinApp.ui.theme.white
 import org.jetbrains.kotlinApp.ui.theme.whiteGrey
-import org.jetbrains.kotlinconf.GetAllChannelDetails
-import org.jetbrains.kotlinconf.GetAllEpisodesDetails
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 // Data classes remain unchanged
 data class SessionSearchData(
@@ -117,179 +113,229 @@ enum class SearchTab(override val title: StringResource) : Tab {
 @Composable
 fun SearchScreen(
     controller: AppController,
+    back: () -> Unit
 ) {
     var query by remember { mutableStateOf("") }
     var selectedTab by remember { mutableStateOf(SearchTab.TALKS) }
     val coroutineScope = rememberCoroutineScope()
 
-    // Loading state
-    var isLoading by remember { mutableStateOf(false) }
-    var currentPage by remember { mutableStateOf(0) }
+    // Separate loading states for each tab
+    var isLoadingTalks by remember { mutableStateOf(false) }
+    var isLoadingPodcasts by remember { mutableStateOf(false) }
+    var isLoadingEpisodes by remember { mutableStateOf(false) }
+
+    // Pagination state
     var hasMoreResults by remember { mutableStateOf(true) }
+    var currentCursor by remember { mutableStateOf<String?>(null) }
+    var prevCursor by remember { mutableStateOf<String?>(null) }
+
+    // Search job for cancellation
     var searchJob by remember { mutableStateOf<Job?>(null) }
 
-    // Results state using raw data types
+    // Results state
     var talkResults by remember { mutableStateOf<List<SessionSearchItem>>(emptyList()) }
     var podcastResults by remember { mutableStateOf<List<PodcastChannelSearchItem>>(emptyList()) }
     var episodeResults by remember { mutableStateOf<List<EpisodeSearchItem>>(emptyList()) }
 
-    // Tags state
+    // Tag management
     val talkTags = remember { mutableStateListOf<String>() }
     val podcastTags = remember { mutableStateListOf<String>() }
     val episodeTags = remember { mutableStateListOf<String>() }
-
-    // Active tags for each type
     val activeTalkTags = remember { mutableStateListOf<String>() }
     val activePodcastTags = remember { mutableStateListOf<String>() }
     val activeEpisodeTags = remember { mutableStateListOf<String>() }
 
-    // List state for infinite scrolling
+    // Scroll state
     val listState = rememberLazyListState()
-    val reachEnd by remember {
+
+    // Track if we need to load more on scroll
+    val shouldLoadMore by remember {
         derivedStateOf {
             val layoutInfo = listState.layoutInfo
-            val totalItemsNumber = layoutInfo.totalItemsCount
-            val lastVisibleItemIndex = (layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) + 1
-            lastVisibleItemIndex > 0 && lastVisibleItemIndex >= totalItemsNumber - 2
+            val lastVisibleItemIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val totalItemsCount = layoutInfo.totalItemsCount
+
+            hasMoreResults && !isLoadingEpisodes && !isLoadingPodcasts && !isLoadingTalks &&
+                    currentCursor != null && lastVisibleItemIndex >= totalItemsCount - 5
         }
     }
 
-    // Perform search with raw data
-    val performSearch = {
+    // Load more results function
+    val loadMoreResults = { tab: SearchTab, cursor: String? ->
         searchJob?.cancel()
         searchJob = coroutineScope.launch {
-            if (!isLoading) {
-                isLoading = true
-                currentPage = 0
+            when (tab) {
+                SearchTab.TALKS -> isLoadingTalks = true
+                SearchTab.PODCASTS -> isLoadingPodcasts = true
+                SearchTab.EPISODES -> isLoadingEpisodes = true
+            }
 
-                try {
-                    val activeTags = when (selectedTab) {
-                        SearchTab.TALKS -> activeTalkTags.toList()
-                        SearchTab.PODCASTS -> activePodcastTags.toList()
-                        SearchTab.EPISODES -> activeEpisodeTags.toList()
+            try {
+                val activeTags = when (tab) {
+                    SearchTab.TALKS -> activeTalkTags.toList()
+                    SearchTab.PODCASTS -> activePodcastTags.toList()
+                    SearchTab.EPISODES -> activeEpisodeTags.toList()
+                }
+
+                val result = controller.service.searchContent(
+                    query = query,
+                    searchTab = tab,
+                    activeTags = activeTags,
+                    cursor = cursor,
+                    limit = 20,
+                    backward = false
+                )
+
+                hasMoreResults = result.hasMore
+                currentCursor = result.nextCursor
+
+                when (tab) {
+                    SearchTab.TALKS -> {
+                        val newItems = result.items as List<SessionSearchItem>
+                        talkResults = talkResults + newItems
                     }
-
-                    val result = controller.service.searchContent(
-                        query = query,
-                        searchTab = selectedTab,
-                        activeTags = activeTags,
-                        page = 0
-                    )
-
-                    hasMoreResults = result.hasMore
-                    when (selectedTab) {
-                        SearchTab.TALKS -> {
-                            @Suppress("UNCHECKED_CAST")
-                            talkResults = result.items as List<SessionSearchItem>
-                        }
-                        SearchTab.PODCASTS -> {
-                            @Suppress("UNCHECKED_CAST")
-                            podcastResults = result.items as List<PodcastChannelSearchItem>
-                        }
-                        SearchTab.EPISODES -> {
-                            @Suppress("UNCHECKED_CAST")
-                            episodeResults = result.items as List<EpisodeSearchItem>
-                        }
+                    SearchTab.PODCASTS -> {
+                        val newItems = result.items as List<PodcastChannelSearchItem>
+                        podcastResults = podcastResults + newItems
                     }
-                } catch (e: Exception) {
-                    println("Search error: ${e.message}")
-                } finally {
-                    isLoading = false
+                    SearchTab.EPISODES -> {
+                        val newItems = result.items as List<EpisodeSearchItem>
+                        episodeResults = episodeResults + newItems
+                    }
+                }
+            } catch (e: Exception) {
+                println("Error loading more results: ${e.message}")
+            } finally {
+                when (tab) {
+                    SearchTab.TALKS -> isLoadingTalks = false
+                    SearchTab.PODCASTS -> isLoadingPodcasts = false
+                    SearchTab.EPISODES -> isLoadingEpisodes = false
                 }
             }
         }
     }
 
-    // Load more data with raw data
-    val loadMoreData = {
-        coroutineScope.launch {
-            if (!isLoading && hasMoreResults) {
-                isLoading = true
-                try {
-                    val activeTags = when (selectedTab) {
-                        SearchTab.TALKS -> activeTalkTags.toList()
-                        SearchTab.PODCASTS -> activePodcastTags.toList()
-                        SearchTab.EPISODES -> activeEpisodeTags.toList()
-                    }
+    // Load more when scrolling near the end
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore) {
+            loadMoreResults(selectedTab, currentCursor)
+        }
+    }
 
-                    val result = controller.service.searchContent(
-                        query = query,
-                        searchTab = selectedTab,
-                        activeTags = activeTags,
-                        page = currentPage
-                    )
+    // Perform search with debounce
+    val performSearch = { tab: SearchTab ->
+        searchJob?.cancel()
+        searchJob = coroutineScope.launch {
+            when (tab) {
+                SearchTab.TALKS -> isLoadingTalks = true
+                SearchTab.PODCASTS -> isLoadingPodcasts = true
+                SearchTab.EPISODES -> isLoadingEpisodes = true
+            }
 
-                    hasMoreResults = result.hasMore
-                    when (selectedTab) {
-                        SearchTab.TALKS -> {
-                            @Suppress("UNCHECKED_CAST")
-                            talkResults = talkResults + (result.items as List<SessionSearchItem>)
-                        }
-                        SearchTab.PODCASTS -> {
-                            @Suppress("UNCHECKED_CAST")
-                            podcastResults = podcastResults + (result.items as List<PodcastChannelSearchItem>)
-                        }
-                        SearchTab.EPISODES -> {
-                            @Suppress("UNCHECKED_CAST")
-                            episodeResults = episodeResults + (result.items as List<EpisodeSearchItem>)
-                        }
-                    }
-                } catch (e: Exception) {
-                    println("Load more error: ${e.message}")
-                } finally {
-                    isLoading = false
+            // Reset cursors and clear results when starting a new search
+            currentCursor = null
+            prevCursor = null
+
+            when (tab) {
+                SearchTab.TALKS -> talkResults = emptyList()
+                SearchTab.PODCASTS -> podcastResults = emptyList()
+                SearchTab.EPISODES -> episodeResults = emptyList()
+            }
+
+            delay(300) // Debounce
+
+            try {
+                val activeTags = when (tab) {
+                    SearchTab.TALKS -> activeTalkTags.toList()
+                    SearchTab.PODCASTS -> activePodcastTags.toList()
+                    SearchTab.EPISODES -> activeEpisodeTags.toList()
+                }
+
+                println("Starting search for $tab with query='$query', tags=$activeTags")
+
+                val result = controller.service.searchContent(
+                    query = query,
+                    searchTab = tab,
+                    activeTags = activeTags,
+                    cursor = null,
+                    limit = 20
+                )
+
+                hasMoreResults = result.hasMore
+                currentCursor = result.nextCursor
+                prevCursor = result.prevCursor
+
+                when (tab) {
+                    SearchTab.TALKS -> talkResults = result.items as List<SessionSearchItem>
+                    SearchTab.PODCASTS -> podcastResults = result.items as List<PodcastChannelSearchItem>
+                    SearchTab.EPISODES -> episodeResults = result.items as List<EpisodeSearchItem>
+                }
+            } catch (e: Exception) {
+                println("Search error: ${e.message}")
+                e.printStackTrace()
+            } finally {
+                when (tab) {
+                    SearchTab.TALKS -> isLoadingTalks = false
+                    SearchTab.PODCASTS -> isLoadingPodcasts = false
+                    SearchTab.EPISODES -> isLoadingEpisodes = false
                 }
             }
         }
     }
 
-    // Infinite scrolling trigger
-    LaunchedEffect(reachEnd) {
-        if (reachEnd && hasMoreResults && !isLoading && when (selectedTab) {
-                SearchTab.TALKS -> talkResults
-                SearchTab.PODCASTS -> podcastResults
-                SearchTab.EPISODES -> episodeResults
-            }.isNotEmpty()
-        ) {
-            currentPage++
-            loadMoreData()
-        }
-    }
-
-    // Load tags and reset search on tab change
+    // Load tags and initial data on tab change
     LaunchedEffect(selectedTab) {
+        // Load tags for the selected tab
         when (selectedTab) {
             SearchTab.TALKS -> {
                 if (talkTags.isEmpty()) {
-                    val tags = controller.service.getSessionTags()
-                    talkTags.clear()
-                    talkTags.addAll(tags)
+                    try {
+                        val tags = controller.service.getSessionTags()
+                        talkTags.clear()
+                        talkTags.addAll(tags)
+                    } catch (e: Exception) {
+                        println("Error loading talk tags: ${e.message}")
+                    }
                 }
             }
             SearchTab.PODCASTS -> {
                 if (podcastTags.isEmpty()) {
-                    val tags = controller.service.getChannelTags()
-                    podcastTags.clear()
-                    podcastTags.addAll(tags)
+                    try {
+                        val tags = controller.service.getChannelTags()
+                        podcastTags.clear()
+                        podcastTags.addAll(tags)
+                    } catch (e: Exception) {
+                        println("Error loading podcast tags: ${e.message}")
+                    }
                 }
             }
             SearchTab.EPISODES -> {
                 if (episodeTags.isEmpty()) {
-                    val tags = controller.service.getEpisodeTags()
-                    episodeTags.clear()
-                    episodeTags.addAll(tags)
+                    try {
+                        val tags = controller.service.getEpisodeTags()
+                        episodeTags.clear()
+                        episodeTags.addAll(tags)
+                    } catch (e: Exception) {
+                        println("Error loading episode tags: ${e.message}")
+                    }
                 }
             }
         }
-        performSearch()
+
+        // Perform initial search if needed
+        if ((selectedTab == SearchTab.TALKS && talkResults.isEmpty() && !isLoadingTalks) ||
+            (selectedTab == SearchTab.PODCASTS && podcastResults.isEmpty() && !isLoadingPodcasts) ||
+            (selectedTab == SearchTab.EPISODES && episodeResults.isEmpty() && !isLoadingEpisodes)) {
+            performSearch(selectedTab)
+        }
     }
 
-    // Debounced search on query or tag change
+    // Perform search when query or active tags change
     LaunchedEffect(query, activeTalkTags.toList(), activePodcastTags.toList(), activeEpisodeTags.toList()) {
-        delay(300)
-        performSearch()
+        performSearch(selectedTab)
     }
 
+    // Main UI
     Column(
         Modifier
             .background(MaterialTheme.colors.grey5Black)
@@ -298,7 +344,7 @@ fun SearchScreen(
         Box {
             TabBar(SearchTab.entries, selectedTab, onSelect = { selectedTab = it })
             Row(horizontalArrangement = Arrangement.Start, modifier = Modifier.fillMaxWidth()) {
-                IconButton(onClick = { controller.back() }) {
+                IconButton(onClick = { back() }) {
                     Icon(
                         painter = Res.drawable.back.painter(),
                         "Back",
@@ -307,8 +353,11 @@ fun SearchScreen(
                 }
             }
         }
+
         SearchField(query, onTextChange = { query = it })
         HDivider()
+
+        // Tags section
         when (selectedTab) {
             SearchTab.TALKS -> {
                 SearchSessionTags(talkTags, activeTalkTags, onClick = {
@@ -330,36 +379,73 @@ fun SearchScreen(
             }
         }
 
-        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            if (isLoading && when (selectedTab) {
-                    SearchTab.TALKS -> talkResults
-                    SearchTab.PODCASTS -> podcastResults
-                    SearchTab.EPISODES -> episodeResults
-                }.isEmpty()
-            ) {
-                CircularProgressIndicator()
-            } else {
-                SearchResults(
-                    query = query,
-                    selected = selectedTab,
-                    talks = talkResults,
-                    podcasts = podcastResults,
-                    episodes = episodeResults,
-                    activeTalkTags = activeTalkTags,
-                    activePodcastTags = activePodcastTags,
-                    activeEpisodeTags = activeEpisodeTags,
-                    controller = controller,
-                    listState = listState
-                )
-                if (isLoading && when (selectedTab) {
-                        SearchTab.TALKS -> talkResults
-                        SearchTab.PODCASTS -> podcastResults
-                        SearchTab.EPISODES -> episodeResults
-                    }.isNotEmpty()
-                ) {
-                    Box(modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp)) {
-                        CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 2.dp)
+        // Results section with proper loading states
+        Box(modifier = Modifier.weight(1f)) {
+            when (selectedTab) {
+                SearchTab.TALKS -> {
+                    if (isLoadingTalks && talkResults.isEmpty()) {
+                        LoadingIndicator("Loading talks...")
+                    } else if (talkResults.isEmpty()) {
+                        EmptyResults("No talks found matching your criteria")
+                    } else {
+                        TalksResults(
+                            talks = talkResults,
+                            query = query,
+                            activeTags = activeTalkTags,
+                            listState = listState,
+                            controller = controller
+                        )
                     }
+                }
+                SearchTab.PODCASTS -> {
+                    if (isLoadingPodcasts && podcastResults.isEmpty()) {
+                        LoadingIndicator("Loading podcasts...")
+                    } else if (podcastResults.isEmpty()) {
+                        EmptyResults("No podcasts found matching your criteria")
+                    } else {
+                        PodcastsResults(
+                            podcasts = podcastResults,
+                            query = query,
+                            activeTags = activePodcastTags,
+                            listState = listState,
+                            controller = controller
+                        )
+                    }
+                }
+                SearchTab.EPISODES -> {
+                    if (isLoadingEpisodes && episodeResults.isEmpty()) {
+                        LoadingIndicator("Loading episodes...")
+                    } else if (episodeResults.isEmpty()) {
+                        EmptyResults("No episodes found matching your criteria")
+                    } else {
+                        EpisodesResults(
+                            episodes = episodeResults,
+                            query = query,
+                            activeTags = activeEpisodeTags,
+                            listState = listState,
+                            controller = controller
+                        )
+                    }
+                }
+            }
+
+            // Bottom loading indicator
+            this@Column.AnimatedVisibility(
+                visible = (selectedTab == SearchTab.TALKS && isLoadingTalks && talkResults.isNotEmpty()) ||
+                        (selectedTab == SearchTab.PODCASTS && isLoadingPodcasts && podcastResults.isNotEmpty()) ||
+                        (selectedTab == SearchTab.EPISODES && isLoadingEpisodes && episodeResults.isNotEmpty()),
+                modifier = Modifier.align(Alignment.BottomCenter)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
                 }
             }
         }
@@ -367,54 +453,32 @@ fun SearchScreen(
 }
 
 @Composable
-internal fun SearchResults(
-    query: String,
-    selected: SearchTab,
-    talks: List<SessionSearchItem>,
-    podcasts: List<PodcastChannelSearchItem>,
-    episodes: List<EpisodeSearchItem>,
-    activeTalkTags: List<String>,
-    activePodcastTags: List<String>,
-    activeEpisodeTags: List<String>,
-    controller: AppController,
-    listState: androidx.compose.foundation.lazy.LazyListState
-) {
-    val textColor = MaterialTheme.colors.blackWhite
-    val secondaryColor = MaterialTheme.colors.grey80Grey20
-    val descriptionColor = grey50
-
-    LazyColumn(state = listState, modifier = Modifier.fillMaxWidth()) {
-        when (selected) {
-            SearchTab.PODCASTS -> items(podcasts) { podcast ->
-                val uiModel = podcast.toUIModel(query)
-                PodcastSearchResult(
-                    imageUrl = uiModel.imageUrl,
-                    text = uiModel.description,
-                    episodeCount = uiModel.episodeCount,
-                    tags = uiModel.categories,
-                    activeTags = activePodcastTags
-                ) { controller.showPodcastScreen(uiModel.id.toLong()) }
-            }
-            SearchTab.TALKS -> items(talks) { talk ->
-                val uiModel = talk.toUIModel(query, textColor, secondaryColor, descriptionColor)
-                TalkSearchResult(
-                    text = uiModel.description,
-                    tags = uiModel.tags,
-                    activeTags = activeTalkTags
-                ) { controller.showSession(uiModel.id) }
-            }
-            SearchTab.EPISODES -> items(episodes) { episode ->
-                val uiModel = episode.toUIModel(query)
-                EpisodeSearchResult(
-                    imageUrl = uiModel.imageUrl,
-                    text = uiModel.description,
-                    pubDate = uiModel.pubDate,
-                    duration = uiModel.duration,
-                    tags = uiModel.categories,
-                    activeTags = activeEpisodeTags
-                ) { controller.showPodcastScreen(uiModel.channelId.toLong()) }
-            }
+private fun LoadingIndicator(message: String) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            CircularProgressIndicator()
+            Text(text = message)
         }
+    }
+}
+
+@Composable
+private fun EmptyResults(message: String) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.body1,
+            color = MaterialTheme.colors.onBackground.copy(alpha = 0.7f)
+        )
     }
 }
 
@@ -467,9 +531,9 @@ internal fun AnnotatedString.Builder.appendPartWithQuery(value: String, query: S
 // Conversion functions
 fun SessionSearchItem.toUIModel(
     query: String,
-    textColor: androidx.compose.ui.graphics.Color,
-    secondaryColor: androidx.compose.ui.graphics.Color,
-    descriptionColor: androidx.compose.ui.graphics.Color
+    textColor: Color,
+    secondaryColor: Color,
+    descriptionColor: Color
 ): SessionSearchData {
     return SessionSearchData(
         id = id,
@@ -535,6 +599,91 @@ fun EpisodeSearchItem.toUIModel(query: String): EpisodeSearchData {
         categories = categories
     )
 }
+
+@Composable
+private fun TalksResults(
+    talks: List<SessionSearchItem>,
+    query: String,
+    activeTags: List<String>,
+    listState: LazyListState,
+    controller: AppController
+) {
+    val textColor = MaterialTheme.colors.blackWhite
+    val secondaryColor = MaterialTheme.colors.grey80Grey20
+    val descriptionColor = grey50
+
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        items(
+            items = talks,
+            key = { it.id }
+        ) { talk ->
+            val uiModel = talk.toUIModel(query, textColor, secondaryColor, descriptionColor)
+            TalkSearchResult(
+                text = uiModel.description,
+                tags = uiModel.tags,
+                activeTags = activeTags
+            ) { controller.showSession(uiModel.id) }
+        }
+    }
+}
+
+@Composable
+private fun PodcastsResults(
+    podcasts: List<PodcastChannelSearchItem>,
+    query: String,
+    activeTags: List<String>,
+    listState: LazyListState,
+    controller: AppController
+) {
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        items(
+            items = podcasts,
+            key = { it.id }
+        ) { podcast ->
+            val uiModel = podcast.toUIModel(query)
+            PodcastSearchResult(
+                imageUrl = uiModel.imageUrl,
+                text = uiModel.description,
+                episodeCount = uiModel.episodeCount,
+                tags = uiModel.categories,
+                activeTags = activeTags
+            ) { controller.showPodcastScreen(uiModel.id.toLong()) }
+        }
+    }
+}
+
+@Composable
+private fun EpisodesResults(
+    episodes: List<EpisodeSearchItem>,
+    query: String,
+    activeTags: List<String>,
+    listState: LazyListState,
+    controller: AppController
+) {
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        items(
+            items = episodes,
+            key = { it.id }
+        ) { episode ->
+            EpisodeListItem(
+                episode = episode,
+                query = query,
+                activeTags = activeTags,
+                controller = controller
+            )
+        }
+    }
+}
+
 
 // Existing TalkSearchResult, PodcastSearchResult, EpisodeSearchResult remain unchanged
 @OptIn(ExperimentalLayoutApi::class)
@@ -646,65 +795,75 @@ private fun PodcastSearchResult(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun EpisodeSearchResult(
-    imageUrl: String?,
-    text: AnnotatedString,
-    pubDate: Long,
-    duration: Long,
-    tags: List<String>,
+private fun EpisodeListItem(
+    episode: EpisodeSearchItem,
+    query: String,
     activeTags: List<String>,
-    onClick: () -> Unit
+    controller: AppController
 ) {
     Column(
         Modifier
             .background(MaterialTheme.colors.whiteGrey)
-            .clickable { onClick() }
+            .clickable { controller.showPodcastScreen(episode.channelId.toLong()) }
             .fillMaxWidth()
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Row {
-                AsyncImage(
-                    imageUrl = imageUrl ?: "",
-                    contentDescription = "Episode Cover",
-                    modifier = Modifier.size(60.dp)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Image with fixed size to prevent recomposition
+            AsyncImage(
+                imageUrl = episode.imageUrl ?: "",
+                contentDescription = "Episode Cover",
+                modifier = Modifier.size(60.dp)
+            )
+
+            // Main content column
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Episode title with minimal highlighting
+                Text(
+                    text = highlightQuery(episode.title, query),
+                    style = MaterialTheme.typography.subtitle1.copy(fontWeight = FontWeight.Bold),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
-                Column(
-                    Modifier
-                        .padding(start = 16.dp)
-                        .weight(1f)
+
+                // Channel name
+                Text(
+                    text = "From: ${episode.channelTitle}",
+                    style = MaterialTheme.typography.caption,
+                    color = MaterialTheme.colors.onBackground.copy(alpha = 0.6f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                // Date and duration
+                Text(
+                    text = "${formatDate(episode.pubDate)} • ${formatDuration(episode.duration)}",
+                    style = MaterialTheme.typography.caption,
+                    color = grey50,
+                    maxLines = 1
+                )
+
+                // Only show tags that are active, and limit to 3
+                FlowRow(
+                    modifier = Modifier.padding(top = 4.dp)
                 ) {
-                    Text(
-                        text = text,
-                        style = MaterialTheme.typography.body2
-                    )
-                    Text(
-                        text = "${formatDate(pubDate)} • ${formatDuration(duration)}",
-                        style = MaterialTheme.typography.caption.copy(color = grey50),
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
-            }
-            if (tags.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                FlowRow {
-                    activeTags.forEach { tag ->
-                        if (tag !in tags) return@forEach
+                    val tagsToShow = activeTags.filter { it in episode.categories }.take(3)
+                    tagsToShow.forEach { tag ->
                         Tag(
                             icon = null,
                             text = tag,
-                            modifier = Modifier.padding(end = 4.dp),
+                            modifier = Modifier
+                                .padding(end = 4.dp, bottom = 4.dp)
+                                .height(24.dp),
                             isActive = true
-                        )
-                    }
-                    tags.forEach { tag ->
-                        if (tag in activeTags) return@forEach
-                        Tag(
-                            icon = null,
-                            text = tag,
-                            modifier = Modifier.padding(end = 4.dp),
-                            isActive = false
                         )
                     }
                 }
@@ -714,11 +873,12 @@ private fun EpisodeSearchResult(
     }
 }
 
+
 private fun formatDate(timestamp: Long): String {
-    val date = java.time.Instant.ofEpochMilli(timestamp)
-        .atZone(java.time.ZoneId.systemDefault())
+    val date = Instant.ofEpochMilli(timestamp)
+        .atZone(ZoneId.systemDefault())
         .toLocalDate()
-    return date.format(java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy"))
+    return date.format(DateTimeFormatter.ofPattern("MMM d, yyyy"))
 }
 
 private fun formatDuration(seconds: Long): String {
@@ -727,114 +887,20 @@ private fun formatDuration(seconds: Long): String {
     return "${minutes}:${remainingSeconds.toString().padStart(2, '0')}"
 }
 
-// Helper functions for query highlighting
-//internal fun AnnotatedString.Builder.appendWithQuery(value: String, query: String) {
-//    if (!value.contains(query, ignoreCase = true)) {
-//        append(value)
-//        return
-//    }
-//
-//    val startIndex = value.indexOf(query, ignoreCase = true)
-//    val endIndex = startIndex + query.length
-//
-//    append(value.substring(0, startIndex))
-//    pushStyle(SpanStyle(color = white, background = orange))
-//    append(value.substring(startIndex, endIndex))
-//    pop()
-//    append(value.substring(endIndex))
-//}
-//
-//internal fun AnnotatedString.Builder.appendPartWithQuery(value: String, query: String) {
-//    val value = value.replace('\n', ' ')
-//    val length: Int = minOf(150, value.length)
-//    if (!value.contains(query, ignoreCase = true)) {
-//        append(value.substring(0, length))
-//        return
-//    }
-//
-//    val startIndex = value.indexOf(query, ignoreCase = true)
-//    val endIndex = startIndex + query.length
-//
-//    val start = maxOf(0, startIndex - 75)
-//    val end = minOf(value.length, endIndex + 75)
-//
-//    append("...")
-//    append(value.substring(start, startIndex))
-//    pushStyle(SpanStyle(color = white, background = orange))
-//    append(value.substring(startIndex, endIndex))
-//    pop()
-//    append(value.substring(endIndex, end))
-//    append("...")
-//}
-//
-//// UI EXTENSION FUNCTIONS (in SearchScreen.kt)
-//
-//// Convert raw data to UI representation when needed
-//@Composable
-//fun SessionSearchItem.toUIModel(query: String): SessionSearchData {
-//    return SessionSearchData(
-//        id = id,
-//        description = buildAnnotatedString {
-//            withStyle(SpanStyle(color = MaterialTheme.colors.blackWhite)) {
-//                appendWithQuery(title, query)
-//            }
-//            append(" / ")
-//            withStyle(SpanStyle(color = MaterialTheme.colors.grey80Grey20)) {
-//                appendWithQuery(speakerLine, query)
-//            }
-//            withStyle(SpanStyle(color = grey50)) {
-//                if (description.isNotBlank()) {
-//                    append(" / ")
-//                    appendPartWithQuery(description, query)
-//                }
-//            }
-//        },
-//        tags = tags,
-//        timeLine = timeLine
-//    )
-//}
-//
-//@Composable
-//fun PodcastChannelSearchItem.toUIModel(query: String): PodcastChannelSearchData {
-//    return PodcastChannelSearchData(
-//        id = id,
-//        description = buildAnnotatedString {
-//            withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-//                appendWithQuery(title, query)
-//            }
-//            append(" by ")
-//            appendWithQuery(author, query)
-//            if (description.contains(query, ignoreCase = true)) {
-//                append(" / ")
-//                appendPartWithQuery(description, query)
-//            }
-//        },
-//        imageUrl = imageUrl,
-//        episodeCount = episodeCount,
-//        categories = categories
-//    )
-//}
-//
-//@Composable
-//fun EpisodeSearchItem.toUIModel(query: String): EpisodeSearchData {
-//    return EpisodeSearchData(
-//        id = id,
-//        channelId = channelId,
-//        description = buildAnnotatedString {
-//            withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-//                appendWithQuery(title, query)
-//            }
-//            append(" from ")
-//            append(channelTitle)
-//            if (description.contains(query, ignoreCase = true)) {
-//                append(" / ")
-//                appendPartWithQuery(description, query)
-//            }
-//        },
-//        imageUrl = imageUrl,
-//        pubDate = pubDate,
-//        duration = duration,
-//        channelTitle = channelTitle,
-//        categories = categories
-//    )
-//}
+// Helper function for query highlighting
+@Composable
+private fun highlightQuery(text: String, query: String): AnnotatedString {
+    if (query.isBlank() || !text.contains(query, ignoreCase = true))
+        return AnnotatedString(text)
+
+    return buildAnnotatedString {
+        val startIndex = text.indexOf(query, ignoreCase = true)
+        val endIndex = startIndex + query.length
+
+        append(text.substring(0, startIndex))
+        withStyle(SpanStyle(background = MaterialTheme.colors.primary.copy(alpha = 0.3f))) {
+            append(text.substring(startIndex, endIndex))
+        }
+        append(text.substring(endIndex))
+    }
+}

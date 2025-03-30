@@ -40,7 +40,6 @@ import org.jetbrains.kotlinApp.utils.App
 import org.jetbrains.kotlinApp.utils.StateFlowClass
 import org.jetbrains.kotlinApp.utils.asStateFlowClass
 import org.jetbrains.kotlinconf.GetAllChannelDetails
-import org.jetbrains.kotlinconf.GetAllEpisodesDetails
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -119,7 +118,8 @@ data class DataInitProgress(
 
 class ConferenceService(
     val context: ApplicationContext,
-    val endpoint: String,
+    private val endpoint: String,
+    private val importEndpoint: String
 ) : CoroutineScope, Closeable {
     private val storage: ApplicationStorage = ApplicationStorage(context)
     private var userId2024: String? by storage.bind(String.serializer().nullable) { null }
@@ -158,15 +158,19 @@ class ConferenceService(
     private val conference = MutableStateFlow(Conference())
 
     private val votes = MutableStateFlow(emptyList<VoteInfo>())
-    private val podcastRepository = PodcastRepository(dbStorage)
+    internal val podcastRepository = PodcastRepository(dbStorage)
+
     private val _podcastChannels = MutableStateFlow<List<GetAllChannelDetails>>(emptyList())
     val podcastChannels: StateFlow<List<GetAllChannelDetails>> = _podcastChannels.asStateFlow()
 
+    private val _currentChannelsCursor = MutableStateFlow<Pair<String?, String?>>(Pair(null, null))
+    val currentChannelsCursor: StateFlow<Pair<String?, String?>> = _currentChannelsCursor.asStateFlow()
+
+    private val _currentEpisodesCursor = MutableStateFlow<Pair<String?, String?>>(Pair(null, null))
+    val currentEpisodesCursor: StateFlow<Pair<String?, String?>> = _currentEpisodesCursor.asStateFlow()
+
     private val _currentChannelEpisodes = MutableStateFlow<List<PodcastEpisode>>(emptyList())
     val currentChannelEpisodes: StateFlow<List<PodcastEpisode>> = _currentChannelEpisodes.asStateFlow()
-
-    private val _allEpisodes = MutableStateFlow<List<GetAllEpisodesDetails>>(emptyList())
-    val allEpisodes: StateFlow<List<GetAllEpisodesDetails>> = _allEpisodes.asStateFlow()
 
     private val _time = MutableStateFlow(GMTDate())
     val time: StateFlowClass<GMTDate> = _time
@@ -263,7 +267,7 @@ class ConferenceService(
     }
 
     // Update import progress
-    fun updateImportProgress(progress: ImportProgress) {
+    private fun updateImportProgress(progress: ImportProgress) {
         if (_dataInitProgress.value.stage == DataInitProgress.InitStage.FAILED) return
 
         when (progress) {
@@ -322,33 +326,78 @@ class ConferenceService(
     private val defaultEpisodeParams = PaginationParams(page = 0, pageSize = 10)
     private val defaultSearchParams = PaginationParams(page = 0, pageSize = 15)
 
-    // Use the repository for loading channels with pagination
-    private fun startPodcastChannelsSync(conferenceService: ConferenceService) {
-        conferenceService.launch {
-            podcastRepository.getChannels(defaultChannelParams)
-                .collect { result ->
-                    _podcastChannels.value = result.items
+    private var channelLoadingJob: Job? = null
+
+    // Add this to the ConferenceService class implementation
+//    override fun close() {
+//        channelLoadingJob?.cancel()
+//        syncManager.stopSync()
+//        client.close()
+//    }
+
+    fun loadChannelsWithCursor(cursor: String? = null, limit: Int = 20, backward: Boolean = false) {
+        // Use a more controlled approach to loading
+        launch(Dispatchers.Default) {
+            try {
+                val result = if (backward && cursor != null) {
+                    // Load previous page
+                    val previousChannels = dbStorage.getChannelsListBackward(cursor.toLong(), limit)
+
+                    // Update state with uniques and maintain cursor state
+                    val updatedChannels = previousChannels + _podcastChannels.value
+                        .distinctBy { it.id } // Ensure no duplicates
+
+                    // Update cursors
+                    val prevCursor = previousChannels.firstOrNull()?.id?.toString()
+                    val nextCursor = _currentChannelsCursor.value.second
+
+                    Triple(updatedChannels, prevCursor, nextCursor)
+                } else {
+                    // Load next page or initial load
+                    val nextChannels = dbStorage.getChannelsList(cursor?.toLong(), limit)
+
+                    // For initial load or next page
+                    val updatedChannels = if (cursor == null) {
+                        nextChannels
+                    } else {
+                        _podcastChannels.value.distinctBy { it.id } + nextChannels
+                    }
+
+                    // Update cursors
+                    val prevCursor = _currentChannelsCursor.value.first
+                    val nextCursor = nextChannels.lastOrNull()?.id?.toString()
+
+                    Triple(updatedChannels, prevCursor, nextCursor)
                 }
+
+                // Update state atomically
+                _podcastChannels.value = result.first
+                _currentChannelsCursor.value = Pair(result.second, result.third)
+
+            } catch (e: Exception) {
+                println("Channel loading error: ${e.message}")
+            }
         }
     }
 
-    // Optimized episode loading with proper job cancellation
-    fun loadEpisodesForChannel(conferenceService: ConferenceService, channelId: Long) {
+    // Update episode loading to use cursor-based pagination
+    fun loadEpisodesForChannel(channelId: Long, cursor: String? = null, limit: Int = 20, backward: Boolean = false) {
         // Cancel any existing job
-        conferenceService.currentEpisodesJob?.cancel()
+        currentEpisodesJob?.cancel()
 
         // Clear current episodes first to avoid UI glitches
-        conferenceService._currentChannelEpisodes.value = emptyList()
+        _currentChannelEpisodes.value = emptyList()
 
-        // Start a new job
-        conferenceService.currentEpisodesJob = conferenceService.launch {
+        // Start a new job with cursor-based pagination
+        currentEpisodesJob = launch {
             try {
-                podcastRepository.getEpisodesForChannel(channelId, defaultEpisodeParams)
+                podcastRepository.getEpisodesForChannel(channelId, cursor?.toLongOrNull(), limit, backward)
                     .collect { result ->
                         _currentChannelEpisodes.value = result.items
+                        // Store cursors for navigation
+                        _currentEpisodesCursor.value = Pair(result.prevCursor, result.nextCursor)
                     }
             } catch (e: CancellationException) {
-                // Expected during navigation
                 throw e
             } catch (e: Exception) {
                 println("Error loading episodes: ${e.message}")
@@ -357,17 +406,25 @@ class ConferenceService(
         }
     }
 
-    // Add pagination support for episodes
-    fun loadMoreEpisodesForChannel(channelId: Long, nextPage: Int) {
+    // Add method for loading more episodes with cursor
+    fun loadMoreEpisodesForChannel(channelId: Long, cursor: String?, limit: Int = 20, backward: Boolean = false) {
         launch {
             try {
-                val params = defaultEpisodeParams.copy(page = nextPage)
-                podcastRepository.getEpisodesForChannel(channelId, params)
-                    .first() // Only get first emission
-                    .let { result ->
-                        // Append to existing episodes
-                        _currentChannelEpisodes.value = _currentChannelEpisodes.value + result.items
-                    }
+                val result = podcastRepository.getEpisodesForChannel(
+                    channelId,
+                    cursor?.toLongOrNull(),
+                    limit,
+                    backward
+                ).first()
+
+                // Append or prepend based on direction
+                if (backward) {
+                    _currentChannelEpisodes.value = result.items + _currentChannelEpisodes.value
+                    _currentEpisodesCursor.value = Pair(result.prevCursor, _currentEpisodesCursor.value.second)
+                } else {
+                    _currentChannelEpisodes.value = _currentChannelEpisodes.value + result.items
+                    _currentEpisodesCursor.value = Pair(_currentEpisodesCursor.value.first, result.nextCursor)
+                }
             } catch (e: Exception) {
                 println("Error loading more episodes: ${e.message}")
             }
@@ -386,32 +443,41 @@ class ConferenceService(
         query: String,
         searchTab: SearchTab,
         activeTags: List<String>,
-        page: Int = 0,
-        pageSize: Int = 20
+        cursor: String? = null,
+        limit: Int = 20,
+        backward: Boolean = false
     ): PaginatedResult<*> {
         // Cancel any ongoing search job
         searchJob?.cancel()
 
         return try {
-            // Create a new coroutine for the search operation
             withContext(Dispatchers.IO) {
-                // Use the external utility functions
                 when (searchTab) {
-                    SearchTab.TALKS -> searchSessionsForUI(query, activeTags, page, pageSize)
-                    SearchTab.PODCASTS -> searchChannelsForUI(query, activeTags, page, pageSize)
-                    SearchTab.EPISODES -> searchEpisodesForUI(query, activeTags, page, pageSize)
+                    SearchTab.TALKS -> {
+                        // For talks we keep the old page-based approach for now
+                        val pageSize = limit
+                        val page = cursor?.toIntOrNull() ?: 0
+                        searchSessionsForUI(query, activeTags, page, pageSize)
+                    }
+                    SearchTab.PODCASTS -> searchChannelsForUI(
+                        query, activeTags, cursor, limit, backward
+                    )
+                    SearchTab.EPISODES -> searchEpisodesForUI(
+                        query, activeTags, cursor, limit, backward
+                    )
                 }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             println("Search error: ${e.message}")
-            // Return empty result on error
             PaginatedResult(
                 items = emptyList<Any>(),
                 totalCount = 0,
                 hasMore = false,
-                nextPage = null
+                nextPage = null,
+                nextCursor = null,
+                prevCursor = null
             )
         }
     }
@@ -553,21 +619,13 @@ class ConferenceService(
 
     private fun startPodcastChannelsSync() {
         launch {
-            dbStorage.getAllChannelsFlow()
-                .collect { channels ->
-//                    _podcastChannels.value = channels
-                }
+//            dbStorage.getAllChannelsFlow()
+//                .collect { channels ->
+////                    _podcastChannels.value = channels
+//                }
         }
     }
 
-    private fun startEpisodesSync() {
-        launch {
-            dbStorage.getAllEpisodesWithCategoriesFlow()
-                .collect { episodes ->
-//                    _allEpisodes.value = episodes
-                }
-        }
-    }
 
     fun loadEpisodesForChannel(channelId: Long) {
         launch {
@@ -599,7 +657,7 @@ class ConferenceService(
             _dataInitProgress.value = DataInitProgress(stage = DataInitProgress.InitStage.PREPARING)
 
             val fileDownloadService = FileDownloadService(context)
-            val serverUrl = "http://192.168.29.32:8000/download_latest_file" // Adjust URL as needed
+            val serverUrl = "$importEndpoint/download_latest_file" // Adjust URL as needed
             val destDir = fileDownloadService.getDefaultDownloadDirectory()
             val fileName = "kotlinapp_data.db"
             val filePath = "$destDir/$fileName"
@@ -691,19 +749,18 @@ class ConferenceService(
                         synchronizeAllData()
                     }
 
-                    // Finalize
-                    syncVotes()
-                    syncFavorites()
-                    syncManager.startSync()
-                    updateConferenceData()
-                    startPodcastChannelsSync()
-                    startEpisodesSync()
 
                     markDatabaseImportComplete()
 
                 } catch (e: Exception) {
                     println("Direct download failed: ${e.message}")
                     throw e
+                }finally {
+                    syncVotes()
+                    syncFavorites()
+                    syncManager.startSync()
+                    updateConferenceData()
+                    startPodcastChannelsSync()
                 }
             }
 
@@ -721,7 +778,6 @@ class ConferenceService(
             syncManager.startSync()
             updateConferenceData()
             startPodcastChannelsSync()
-            startEpisodesSync()
 
             markDatabaseImportComplete()
         }
@@ -737,7 +793,6 @@ class ConferenceService(
 //        downloadAndSyncSessionRelations()
         updateConferenceData()
         startPodcastChannelsSync()
-        startEpisodesSync()
     }
 
 
@@ -755,7 +810,7 @@ class ConferenceService(
                     syncManager.startSync()
                     updateConferenceData()
                     startPodcastChannelsSync()
-                    startEpisodesSync()
+                    loadChannelsWithCursor(limit = 20)
                 }
             }
 

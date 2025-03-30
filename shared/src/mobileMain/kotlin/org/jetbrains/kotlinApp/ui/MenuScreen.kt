@@ -17,7 +17,6 @@ import kotlinconfapp.shared.generated.resources.Res
 import kotlinconfapp.shared.generated.resources.X
 import kotlinconfapp.shared.generated.resources.about_conference
 import kotlinconfapp.shared.generated.resources.arrow_right
-import kotlinconfapp.shared.generated.resources.code_of_conduct
 import kotlinconfapp.shared.generated.resources.hashtag
 import kotlinconfapp.shared.generated.resources.menu
 import kotlinconfapp.shared.generated.resources.mobile_app

@@ -32,7 +32,6 @@ import org.jetbrains.kotlinApp.SessionInfo
 import org.jetbrains.kotlinApp.Speaker
 import org.jetbrains.kotlinApp.SpeakerInfo
 import org.jetbrains.kotlinApp.VoteInfo
-import org.jetbrains.kotlinApp.backend.Feedback.feedback
 import org.jetbrains.kotlinApp.backend.Votes.sessionId
 import java.time.LocalDateTime
 
@@ -55,7 +54,7 @@ internal class Store(application: Application) {
                 maximumPoolSize = dbPoolSize
             }
         } else {
-            application.log.info("Host not found, using fallback")
+            application.log.info("Host not found")
 //            hikariConfig.jdbcUrl = "jdbc:h2:file:./kotlinconfg"
 //            hikariConfig.validate()
         }
@@ -78,7 +77,8 @@ internal class Store(application: Application) {
                 SessionCategories,
                 PodcastChannels,
                 PodcastEpisodes,
-                PodcastCategories,
+                PodcastChannelCategories,
+                PodcastEpisodeCategories,
                 ChannelCategoryMap,
                 EpisodeCategoryMap,
                 PodcastRequest
@@ -249,7 +249,7 @@ internal class Store(application: Application) {
         // Insert speaker associations
         session.speakerIds.forEach { speakerId ->
             SessionSpeakers.insert {
-                it[SessionSpeakers.sessionId] = generatedId
+                it[sessionId] = generatedId
                 it[SessionSpeakers.speakerId] = speakerId
             }
         }
@@ -257,7 +257,7 @@ internal class Store(application: Application) {
         // Insert category associations
         session.categoryIds.forEach { categoryId ->
             SessionCategories.insert {
-                it[SessionCategories.sessionId] = generatedId
+                it[sessionId] = generatedId
                 it[SessionCategories.categoryId] = categoryId
             }
         }
@@ -492,17 +492,17 @@ internal class Store(application: Application) {
                 }
             } get PodcastChannels.id
 
-            // 2. Insert/get categories and map them to channel
+            // 2. Insert/get channel categories and map them to the channel
             importRequest.categories.forEach { catName ->
-                // Find or create category
-                val categoryId = PodcastCategories
-                    .selectAll().where { PodcastCategories.name eq catName }
-                    .map { it[PodcastCategories.id] }
-                    .singleOrNull() ?: (PodcastCategories.insert {
+                // Find or create channel category
+                val categoryId = PodcastChannelCategories
+                    .selectAll().where { PodcastChannelCategories.name eq catName }
+                    .map { it[PodcastChannelCategories.id] }
+                    .singleOrNull() ?: (PodcastChannelCategories.insert {
                     it[name] = catName
-                } get PodcastCategories.id)
+                } get PodcastChannelCategories.id)
 
-                // Create mapping between channel and category
+                // Create mapping between channel and channel category
                 ChannelCategoryMap.insert {
                     it[ChannelCategoryMap.channelId] = channelId
                     it[ChannelCategoryMap.categoryId] = categoryId
@@ -528,15 +528,15 @@ internal class Store(application: Application) {
 
                 // Insert episode categories if present
                 ep.episodeCategory.forEach { catName ->
-                    // Find or create category
-                    val categoryId = PodcastCategories
-                        .selectAll().where { PodcastCategories.name eq catName }
-                        .map { it[PodcastCategories.id] }
-                        .singleOrNull() ?: (PodcastCategories.insert {
+                    // Find or create episode category
+                    val categoryId = PodcastEpisodeCategories
+                        .selectAll().where { PodcastEpisodeCategories.name eq catName }
+                        .map { it[PodcastEpisodeCategories.id] }
+                        .singleOrNull() ?: (PodcastEpisodeCategories.insert {
                         it[name] = catName
-                    } get PodcastCategories.id)
+                    } get PodcastEpisodeCategories.id)
 
-                    // Create mapping between episode and category
+                    // Create mapping between episode and episode category
                     EpisodeCategoryMap.insert {
                         it[EpisodeCategoryMap.episodeId] = episodeId
                         it[EpisodeCategoryMap.categoryId] = categoryId
@@ -548,31 +548,36 @@ internal class Store(application: Application) {
         }
 
     suspend fun getAllPodcastData(): List<ChannelFullData> = newSuspendedTransaction(Dispatchers.IO) {
-        // 1. Get all categories in one query for efficient lookup
-        val allCategories = PodcastCategories
+        // 1. Get all channel categories in one query for efficient lookup
+        val allChannelCategories = PodcastChannelCategories
             .selectAll()
-            .associate { it[PodcastCategories.id] to it[PodcastCategories.name] }
+            .associate { it[PodcastChannelCategories.id] to it[PodcastChannelCategories.name] }
 
-        // 2. Get all channel-category mappings in one query
+        // 2. Get all episode categories in one query for efficient lookup
+        val allEpisodeCategories = PodcastEpisodeCategories
+            .selectAll()
+            .associate { it[PodcastEpisodeCategories.id] to it[PodcastEpisodeCategories.name] }
+
+        // 3. Get all channel-category mappings in one query
         val channelCategories = ChannelCategoryMap
             .selectAll()
             .groupBy({ it[ChannelCategoryMap.channelId] }) { it[ChannelCategoryMap.categoryId] }
-            .mapValues { (_, categoryIds) -> categoryIds.mapNotNull { allCategories[it] } }
+            .mapValues { (_, categoryIds) -> categoryIds.mapNotNull { allChannelCategories[it] } }
 
-        // 3. Get all episode-category mappings in one query
+        // 4. Get all episode-category mappings in one query
         val episodeCategories = EpisodeCategoryMap
             .selectAll()
             .groupBy({ it[EpisodeCategoryMap.episodeId] }) { it[EpisodeCategoryMap.categoryId] }
-            .mapValues { (_, categoryIds) -> categoryIds.mapNotNull { allCategories[it] } }
+            .mapValues { (_, categoryIds) -> categoryIds.mapNotNull { allEpisodeCategories[it] } }
 
-        // 4. Get all channels
+        // 5. Get all channels
         val channels = PodcastChannels
             .selectAll()
             .orderBy(PodcastChannels.id to SortOrder.ASC)
             .map { channelRow ->
                 val channelId = channelRow[PodcastChannels.id]
 
-                // 5. Get episodes for this channel
+                // 6. Get episodes for this channel
                 val episodes = PodcastEpisodes
                     .selectAll()
                     .where { PodcastEpisodes.channelId eq channelId }

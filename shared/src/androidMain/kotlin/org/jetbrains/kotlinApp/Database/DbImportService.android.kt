@@ -3,7 +3,6 @@ package org.jetbrains.kotlinApp.Database
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import app.cash.sqldelight.db.SqlDriver
-import app.cash.sqldelight.driver.android.AndroidSqliteDriver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -207,7 +206,8 @@ actual class DatabaseImportService actual constructor(
                 when (tableName) {
                     "PodcastChannels" -> insertPodcastChannel(cursor, columnIndices)
                     "PodcastEpisodes" -> insertPodcastEpisode(cursor, columnIndices)
-                    "PodcastCategories" -> insertPodcastCategory(cursor, columnIndices)
+                    "PodcastChannelCategories" -> insertPodcastChannelCategory(cursor, columnIndices)
+                    "PodcastEpisodeCategories" -> insertPodcastEpisodeCategory(cursor, columnIndices)
                     "ChannelCategoryMap" -> insertChannelCategoryMap(cursor, columnIndices)
                     "EpisodeCategoryMap" -> insertEpisodeCategoryMap(cursor, columnIndices)
                     // Add other tables as needed
@@ -282,16 +282,21 @@ actual class DatabaseImportService actual constructor(
         )
     }
 
-    private fun insertPodcastCategory(cursor: Cursor, columnIndices: Map<String, Int>) {
+    private fun insertPodcastChannelCategory(cursor: Cursor, columnIndices: Map<String, Int>) {
         val name = getColumnValueFast(cursor, columnIndices, "name") as? String ?: return
-        database.sessionDatabaseQueries.insertPodcastCategory(name)
+        database.sessionDatabaseQueries.insertChannelCategory(name)
+    }
+
+    private fun insertPodcastEpisodeCategory(cursor: Cursor, columnIndices: Map<String, Int>) {
+        val name = getColumnValueFast(cursor, columnIndices, "name") as? String ?: return
+        database.sessionDatabaseQueries.insertEpisodeCategory(name)
     }
 
     private fun insertChannelCategoryMap(cursor: Cursor, columnIndices: Map<String, Int>) {
         val channelId = getColumnValueFast(cursor, columnIndices, "channelId") as? Long ?: return
         val categoryId = getColumnValueFast(cursor, columnIndices, "categoryId") as? Long ?: return
 
-        database.sessionDatabaseQueries.insertChannelCategory(
+        database.sessionDatabaseQueries.insertChannelCategoryMap(
             channelId = channelId,
             categoryId = categoryId
         )
@@ -301,7 +306,7 @@ actual class DatabaseImportService actual constructor(
         val episodeId = getColumnValueFast(cursor, columnIndices, "episodeId") as? Long ?: return
         val categoryId = getColumnValueFast(cursor, columnIndices, "categoryId") as? Long ?: return
 
-        database.sessionDatabaseQueries.insertEpisodeCategory(
+        database.sessionDatabaseQueries.insertEpisodeCategoryMap(
             episodeId = episodeId,
             categoryId = categoryId
         )

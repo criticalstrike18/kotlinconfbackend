@@ -5,8 +5,6 @@ import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.kotlin.datetime.CurrentDateTime
 import org.jetbrains.exposed.sql.kotlin.datetime.datetime
 import org.jetbrains.exposed.sql.kotlin.datetime.timestamp
-import org.jetbrains.kotlinApp.backend.PodcastChannels.autoIncrement
-import org.jetbrains.kotlinApp.backend.PodcastEpisodes.channelId
 
 abstract class BaseTable(name: String) : Table(name) {
     val createdAt = datetime("created_at").defaultExpression(CurrentDateTime)
@@ -96,7 +94,7 @@ object ConferenceSpeakers : BaseTable("conference_speakers") {
     }
 }
 
-object ConferenceRooms : Table() {
+object ConferenceRooms : BaseTable("conference_rooms") {
     val id = integer("id").autoIncrement()
     val name = varchar("name", 255)
     val sort = integer("sort").nullable()
@@ -107,7 +105,7 @@ object ConferenceRooms : Table() {
     }
 }
 
-object ConferenceCategories : Table() {
+object ConferenceCategories : BaseTable("conference_categories") {
     val id = integer("id").autoIncrement()
     val title = varchar("title", 255)
     val sort = integer("sort").nullable()
@@ -119,7 +117,7 @@ object ConferenceCategories : Table() {
     }
 }
 
-object SessionSpeakers : Table() {
+object SessionSpeakers : BaseTable("session_speakers") {
     val sessionId = varchar("session_id", 50) references ConferenceSessions.id
     val speakerId = varchar("speaker_id", 50) references ConferenceSpeakers.id
 
@@ -130,7 +128,7 @@ object SessionSpeakers : Table() {
     }
 }
 
-object SessionCategories : Table() {
+object SessionCategories : BaseTable("session_categories") {
     val sessionId = varchar("session_id", 50) references ConferenceSessions.id
     val categoryId = integer("category_item_id") references ConferenceCategories.id
 
@@ -197,7 +195,14 @@ object PodcastEpisodes : BaseTable("podcast_episodes") {
     }
 }
 
-object PodcastCategories : BaseTable("podcast_categories") {
+object PodcastChannelCategories : BaseTable("podcast_channel_categories") {
+    val id = integer("id").autoIncrement()
+    val name = varchar("name", 255).uniqueIndex()
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+object PodcastEpisodeCategories : BaseTable("podcast_episode_categories") {
     val id = integer("id").autoIncrement()
     val name = varchar("name", 255).uniqueIndex()
 
@@ -206,7 +211,7 @@ object PodcastCategories : BaseTable("podcast_categories") {
 
 object ChannelCategoryMap : BaseTable("channel_category_map") {
     val channelId = reference("channel_id", PodcastChannels.id)
-    val categoryId = reference("category_id", PodcastCategories.id)
+    val categoryId = reference("category_id", PodcastChannelCategories.id)
 
     override val primaryKey = PrimaryKey(channelId, categoryId)
 
@@ -218,7 +223,7 @@ object ChannelCategoryMap : BaseTable("channel_category_map") {
 
 object EpisodeCategoryMap : BaseTable("episode_category_map") {
     val episodeId = reference("episode_id", PodcastEpisodes.id)
-    val categoryId = reference("category_id", PodcastCategories.id)
+    val categoryId = reference("category_id", PodcastEpisodeCategories.id)
 
     override val primaryKey = PrimaryKey(episodeId, categoryId)
 

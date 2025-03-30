@@ -67,7 +67,7 @@ kotlin {
 
                 implementation(libs.kotlinx.serialization.core)
                 implementation(libs.kotlinx.serialization.protobuf)
-                implementation("com.powersync:core:1.0.0-BETA26")
+//                implementation("com.powersync:core:1.0.0-BETA26")
 
             }
         }
@@ -92,6 +92,7 @@ kotlin {
                 implementation(libs.ktor.client.core)
 
                 api(libs.image.loader)
+//                api("com.powersync:core:1.0.0-BETA26")
 
             }
         }

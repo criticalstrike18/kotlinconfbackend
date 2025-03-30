@@ -13,15 +13,16 @@ import com.seiko.imageloader.LocalImageLoader
 import org.jetbrains.kotlinApp.podcast.PodcastViewModel
 import org.jetbrains.kotlinApp.ui.MainScreen
 import org.jetbrains.kotlinApp.ui.theme.KotlinConfTheme
-
-const val apiEndpoint = "http://192.168.29.32:8080"
+const val ip = "192.168.43.253"
+const val apiEndpoint = "http://$ip:8080"
+const val importEndpoint = "http://$ip:8000"
 
 @Composable
 fun App(context: ApplicationContext) {
     val viewModel = viewModel { PodcastViewModel(context) }
 
     KotlinConfTheme {
-        val service = remember { ConferenceService(context, apiEndpoint) }
+        val service = remember { ConferenceService(context, apiEndpoint, importEndpoint ) }
 
         CompositionLocalProvider(
             LocalImageLoader provides remember { createImageLoader(context) }

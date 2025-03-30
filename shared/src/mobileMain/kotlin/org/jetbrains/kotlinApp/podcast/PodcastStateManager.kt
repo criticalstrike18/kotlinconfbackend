@@ -37,7 +37,7 @@ class PodcastStateManager(
     // Save state periodically
     init {
         scope.launch {
-            while (true) {
+            while (playbackState.value.episodeId != null) {
                 delay(5000) // Save every 5 seconds
                 saveCurrentState()
             }

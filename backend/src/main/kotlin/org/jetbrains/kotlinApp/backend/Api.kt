@@ -27,7 +27,6 @@ import org.jetbrains.kotlinApp.SessionResponse
 import org.jetbrains.kotlinApp.SessionSpeakerRequest
 import org.jetbrains.kotlinApp.VoteInfo
 import org.jetbrains.kotlinApp.Votes
-import org.jetbrains.kotlinApp.backend.Feedback.feedback
 import java.time.Clock
 import java.time.LocalDateTime
 
@@ -354,7 +353,7 @@ private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
         try {
             val sessionCategories = call.receive<SessionCategoriesRequest>()
 
-            // Verify that both session and speaker exist
+            // Verify that both session and category exist
             database.getSessionById(sessionCategories.sessionId)
                 ?: throw NotFoundException("Session not found")
             database.getCategoryById(sessionCategories.categoryId)
@@ -374,7 +373,7 @@ private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
         }
     }
 
-
+    // Admin-only routes
     post("admin/session") {
         call.validateSecret(adminSecret)
         try {
@@ -386,7 +385,6 @@ private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
         }
     }
 
-    // Admin-only routes
     post("admin/speakers") {
         call.validateSecret(adminSecret)
         try {
@@ -395,6 +393,29 @@ private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
             call.respond(HttpStatusCode.Created, "Speaker added successfully")
         } catch (e: Exception) {
             error(e)
+        }
+    }
+
+    post("send/rooms") {
+        call.validateSecret(adminSecret)
+        try {
+            val room = call.receive<ConferenceRoomRequest>()
+            val roomId = database.addRoom(room)
+            call.respond(
+                RoomResponse(
+                    success = true,
+                    roomId = roomId,
+                    message = "Room added successfully"
+                )
+            )
+        } catch (e: Exception) {
+            call.respond(
+                RoomResponse(
+                    success = false,
+                    roomId = null,
+                    message = e.message
+                )
+            )
         }
     }
 
@@ -432,7 +453,7 @@ private fun Route.podcastRoutes(database: Store, adminSecret: String) {
             call.respond(
                 mapOf(
                     "status" to "ok",
-                    "channel_id" to channelId
+                    "channel_id" to channelId.toString()
                 )
             )
         } catch (e: Exception) {

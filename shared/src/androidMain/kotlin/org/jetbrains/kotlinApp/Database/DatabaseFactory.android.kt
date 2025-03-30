@@ -10,7 +10,7 @@ actual class DriverFactory actual constructor(private val context: ApplicationCo
         return AndroidSqliteDriver(
             SessionDatabase.Schema,
             context.application,
-            "kotlinApp.db"
+            "kotlinApp.db",
         )
     }
 }

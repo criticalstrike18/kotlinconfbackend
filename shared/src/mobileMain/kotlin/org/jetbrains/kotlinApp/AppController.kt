@@ -173,11 +173,10 @@ class AppController(internal val service: ConferenceService, private val podcast
     }
 
 
-
     fun back() {
         if (stack.isEmpty()) return
 
-        stack.removeLast()
+        stack.removeAt(stack.size - 1)
         last.value = stack.lastOrNull()
     }
 
@@ -218,7 +217,7 @@ class AppController(internal val service: ConferenceService, private val podcast
 //            val podcasts by service.podcastChannels.collectAsState()
 //            val episodes by service.allEpisodes.collectAsState()
 
-            SearchScreen(it)
+            SearchScreen(it, { back() })
         }
     }
 

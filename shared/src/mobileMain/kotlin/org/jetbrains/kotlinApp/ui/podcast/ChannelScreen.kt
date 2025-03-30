@@ -1,3 +1,5 @@
+@file:OptIn(FlowPreview::class)
+
 package org.jetbrains.kotlinApp.ui.podcast
 
 import androidx.compose.animation.AnimatedVisibility
@@ -15,18 +17,27 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
 import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -72,6 +83,62 @@ fun ChannelScreen(
 ) {
     val listState = rememberLazyListState()
     val channels by service.podcastChannels.collectAsState()
+    val channelsCursor by service.currentChannelsCursor.collectAsState()
+
+    // Loading states
+    var isLoadingMore by remember { mutableStateOf(false) }
+    var isLoadingPrevious by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Initial load
+    LaunchedEffect(Unit) {
+        if (channels.isEmpty()) {
+            service.loadChannelsWithCursor(limit = 50)
+        }
+    }
+
+    // Scroll detection for infinite scrolling
+    LaunchedEffect(listState, channels.size) {
+        // Wait for layout to be stable
+        snapshotFlow {
+            Triple(
+                listState.firstVisibleItemIndex,
+                listState.layoutInfo.visibleItemsInfo.size,
+                listState.layoutInfo.totalItemsCount
+            )
+        }
+            .debounce(100) // Debounce to prevent rapid firing
+            .collect { (firstVisible, visibleCount, totalCount) ->
+                // Check if we're near the beginning (load previous)
+                if (firstVisible < 2 && !isLoadingPrevious && channelsCursor.first != null) {
+                    isLoadingPrevious = true
+                    try {
+                        service.loadChannelsWithCursor(
+                            cursor = channelsCursor.first,
+                            limit = 10,
+                            backward = true
+                        )
+                    } finally {
+                        isLoadingPrevious = false
+                    }
+                }
+
+                // Check if we're near the end (load more)
+                val lastVisible = firstVisible + visibleCount
+                if (lastVisible > totalCount - 3 && !isLoadingMore && channelsCursor.second != null) {
+                    isLoadingMore = true
+                    try {
+                        service.loadChannelsWithCursor(
+                            cursor = channelsCursor.second,
+                            limit = 10,
+                            backward = false
+                        )
+                    } finally {
+                        isLoadingMore = false
+                    }
+                }
+            }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -85,23 +152,62 @@ fun ChannelScreen(
                 isRightVisible = false
             )
 
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.background(MaterialTheme.colors.whiteGrey)
-            ) {
-                items(
-                    items = channels,
-                    key = { it.id }
-                ) { channel ->
-                    ChannelCard(
-                        channel = channel,
-                        onClick = { onNavigateToEpisodes(channel.id) }
-                    )
+            if (channels.isEmpty()) {
+                // Initial loading state
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.background(MaterialTheme.colors.whiteGrey)
+                ) {
+                    // Top loading indicator
+                    item(key = "top-loader") {
+                        if (isLoadingPrevious) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                            }
+                        }
+                    }
+
+                    // Channel items
+                    items(
+                        items = channels,
+                        key = { channel -> "channel-${channel.id}" }
+                    ) { channel ->
+                        ChannelCard(
+                            channel = channel,
+                            onClick = { onNavigateToEpisodes(channel.id) }
+                        )
+                    }
+
+                    // Bottom loading indicator
+                    item(key = "bottom-loader") {
+                        if (isLoadingMore) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Mini player with synchronized state
+        // Mini player
         AnimatedVisibility(
             visible = playerState.currentEpisode != null,
             enter = slideInVertically(initialOffsetY = { it }),

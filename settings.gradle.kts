@@ -28,3 +28,4 @@ plugins {
 include(":androidApp")
 include(":shared")
 include(":backend")
+

@@ -7,89 +7,71 @@ import org.jetbrains.kotlinApp.podcast.PaginatedResult
 suspend fun ConferenceService.searchChannelsForUI(
     query: String,
     activeTags: List<String>,
-    page: Int,
-    pageSize: Int
+    cursor: String? = null,
+    limit: Int = 20,
+    backward: Boolean = false
 ): PaginatedResult<PodcastChannelSearchItem> {
     return withContext(Dispatchers.IO) {
-        // Get raw database results
-        val searchResults = dbStorage.searchChannelsPaginated(
-            query = query,
-            activeTags = activeTags,
-            page = page,
-            pageSize = pageSize
-        )
+        try {
+            // Use the tag-based channel search from PodcastRepository
+            val result = podcastRepository.searchChannelsFTS(
+                query = query,
+                tags = activeTags,  // Tags are now the primary filter
+                cursor = cursor?.toLongOrNull(),
+                limit = limit,
+                backward = backward
+            )
 
-        // Get total count
-        val totalCount = dbStorage.countSearchChannels(query, activeTags).toInt()
-
-        // Map to raw data model
-        val items = searchResults.map { row ->
-            PodcastChannelSearchItem(
-                id = row.id.toString(),
-                title = row.title ?: "",
-                author = row.author ?: "",
-                description = row.description ?: "",
-                imageUrl = row.imageUrl,
-                episodeCount = row.episodeCount ?: 0,
-                categories = row.categories?.split(",")?.map { it.trim() }
-                    ?.filterNot { it.isBlank() } ?: emptyList()
+            // Convert to PaginatedResult format
+            PaginatedResult(
+                items = result.items,
+                totalCount = -1, // Not needed with cursor-based pagination
+                hasMore = result.hasMore,
+                nextPage = null,
+                nextCursor = result.nextCursor,
+                prevCursor = result.prevCursor
+            )
+        } catch (e: Exception) {
+            println("Channel search error: ${e.message}")
+            PaginatedResult(
+                items = emptyList(),
+                totalCount = 0,
+                hasMore = false,
+                nextPage = null,
+                nextCursor = null,
+                prevCursor = null
             )
         }
-
-        // Calculate pagination metadata
-        val hasMore = (page + 1) * pageSize < totalCount
-
-        PaginatedResult(
-            items = items,
-            totalCount = totalCount,
-            hasMore = hasMore,
-            nextPage = if (hasMore) page + 1 else null
-        )
     }
 }
 
-
+// In SearchUtils.kt - update searchEpisodesForUI method
 suspend fun ConferenceService.searchEpisodesForUI(
     query: String,
     activeTags: List<String>,
-    page: Int,
-    pageSize: Int
+    cursor: String? = null,
+    limit: Int = 20,
+    backward: Boolean = false
 ): PaginatedResult<EpisodeSearchItem> {
     return withContext(Dispatchers.IO) {
         try {
-            // Use the same database pagination functions as before
-            val searchResults = dbStorage.searchEpisodesBasicPaginated(
+            // Use the optimized category-based search instead of direct episode search
+            val result = podcastRepository.searchEpisodesByCategory(
                 query = query,
-                activeTags = activeTags,
-                page = page,
-                pageSize = pageSize
+                tags = activeTags,
+                cursor = cursor?.toLongOrNull()?.toString(),
+                limit = limit,
+                backward = backward
             )
 
-            val totalCount = dbStorage.countSearchEpisodes(query, activeTags).toInt()
-
-            // Map database results to our UI model
-            val items = searchResults.map { row ->
-                EpisodeSearchItem(
-                    id = row.id.toString(),
-                    channelId = row.channelId.toString(),
-                    title = row.title ?: "",
-                    description = row.description ?: "",
-                    channelTitle = row.channelTitle ?: "",
-                    imageUrl = row.imageUrl,
-                    pubDate = row.pubDate ?: 0,
-                    duration = row.duration ?: 0,
-                    categories =  emptyList()
-                )
-            }
-
-            // Calculate pagination metadata
-            val hasMore = (page + 1) * pageSize < totalCount
-
+            // Convert to PaginatedResult format for compatibility
             PaginatedResult(
-                items = items,
-                totalCount = totalCount,
-                hasMore = hasMore,
-                nextPage = if (hasMore) page + 1 else null
+                items = result.items,
+                totalCount = -1, // Not needed with cursor-based pagination
+                hasMore = result.hasMore,
+                nextPage = null, // No longer using page numbers
+                nextCursor = result.nextCursor,
+                prevCursor = result.prevCursor
             )
         } catch (e: Exception) {
             println("Error searching episodes: ${e.message}")
@@ -98,11 +80,14 @@ suspend fun ConferenceService.searchEpisodesForUI(
                 items = emptyList(),
                 totalCount = 0,
                 hasMore = false,
-                nextPage = null
+                nextPage = null,
+                nextCursor = null,
+                prevCursor = null
             )
         }
     }
 }
+
 
 suspend fun ConferenceService.searchSessionsForUI(
     query: String,
