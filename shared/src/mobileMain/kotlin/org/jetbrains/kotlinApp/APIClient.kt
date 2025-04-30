@@ -2,19 +2,36 @@
 
 package org.jetbrains.kotlinApp
 
-import io.ktor.client.*
-import io.ktor.client.call.*
-import io.ktor.client.plugins.*
-import io.ktor.client.plugins.contentnegotiation.*
-import io.ktor.client.plugins.logging.*
-import io.ktor.client.request.*
-import io.ktor.client.statement.*
-import io.ktor.http.*
-import io.ktor.serialization.kotlinx.json.*
-import io.ktor.serialization.kotlinx.protobuf.protobuf
-import io.ktor.util.date.*
-import io.ktor.utils.io.core.*
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.plugins.DefaultRequest
+import io.ktor.client.plugins.HttpRequestRetry
+import io.ktor.client.plugins.HttpResponseValidator
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.logging.LogLevel
+import io.ktor.client.plugins.logging.Logging
+import io.ktor.client.request.HttpRequestBuilder
+import io.ktor.client.request.accept
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.request.parameter
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
+import io.ktor.http.encodedPath
+import io.ktor.http.isSuccess
+import io.ktor.http.path
+import io.ktor.http.takeFrom
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.util.date.GMTDate
+import io.ktor.utils.io.core.Closeable
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNamingStrategy
 import org.jetbrains.kotlinApp.utils.appLogger
 
 val HTTP_CLIENT = HttpClient()
@@ -29,8 +46,11 @@ class APIClient(
 
     private val client = HTTP_CLIENT.config {
         install(ContentNegotiation) {
-            json()
-            protobuf()
+            json(Json {
+                ignoreUnknownKeys = true
+                coerceInputValues = true // This helps with nulls
+                explicitNulls = false // This treats absent fields as nulls
+            })
         }
 
         install(Logging) {
@@ -124,6 +144,79 @@ class APIClient(
             apiUrl("get/session-categories")
         }.body()
     }
+
+    suspend fun getSessionDataSince(timestamp: Long): List<SessionInfo> {
+        return try {
+            val response = client.get("$apiEndpoint/sessions") {
+                parameter("since", timestamp)
+            }
+            response.body<List<SessionInfo>>()
+        } catch (e: Exception) {
+            println("Failed to get sessions since $timestamp: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Gets speaker data that has changed since a given timestamp.
+     */
+    suspend fun getSpeakerDataSince(timestamp: Long): List<SpeakerInfo> {
+        return try {
+            val response = client.get("$apiEndpoint/speakers") {
+                parameter("since", timestamp)
+            }
+            response.body<List<SpeakerInfo>>()
+        } catch (e: Exception) {
+            println("Failed to get speakers since $timestamp: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Gets room data that has changed since a given timestamp.
+     */
+    suspend fun getRoomDataSince(timestamp: Long): List<RoomTable> {
+        return try {
+            val response = client.get("$apiEndpoint/rooms") {
+                parameter("since", timestamp)
+            }
+            response.body<List<RoomTable>>()
+        } catch (e: Exception) {
+            println("Failed to get rooms since $timestamp: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Gets category data that has changed since a given timestamp.
+     */
+    suspend fun getCategoryDataSince(timestamp: Long): List<CategoriesTable> {
+        return try {
+            val response = client.get("$apiEndpoint/categories") {
+                parameter("since", timestamp)
+            }
+            response.body<List<CategoriesTable>>()
+        } catch (e: Exception) {
+            println("Failed to get categories since $timestamp: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Gets podcast data that has changed since a given timestamp.
+     */
+    suspend fun getPodcastDataSince(timestamp: Long): List<ChannelFullData> {
+        return try {
+            val response = client.get("$apiEndpoint/podcasts") {
+                parameter("since", timestamp)
+            }
+            response.body<List<ChannelFullData>>()
+        } catch (e: Exception) {
+            println("Failed to get podcast data since $timestamp: ${e.message}")
+            emptyList()
+        }
+    }
+
 
     suspend fun sendSessionData(request: ConferenceSessionRequest): SessionResponse {
         return try {

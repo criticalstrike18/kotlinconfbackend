@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -30,6 +31,7 @@ import org.jetbrains.kotlinApp.fileImport.DownloadStatus
 import org.jetbrains.kotlinApp.fileImport.FileDownloadService
 import org.jetbrains.kotlinApp.podcast.PaginatedResult
 import org.jetbrains.kotlinApp.podcast.PaginationParams
+import org.jetbrains.kotlinApp.podcast.PodcastCacheManager
 import org.jetbrains.kotlinApp.podcast.PodcastEpisode
 import org.jetbrains.kotlinApp.podcast.PodcastRepository
 import org.jetbrains.kotlinApp.storage.ApplicationStorage
@@ -152,7 +154,7 @@ class ConferenceService(
     private val _importProgress = MutableStateFlow<ImportProgress>(ImportProgress.Idle)
     val importProgress: StateFlow<ImportProgress> = _importProgress
 
-    private val syncManager = SyncManager(dbStorage, client, this)
+    private val syncManager = SyncManager(dbStorage, client, this, storage)
 
     private val favorites = MutableStateFlow(emptySet<String>())
     private val conference = MutableStateFlow(Conference())
@@ -171,6 +173,15 @@ class ConferenceService(
 
     private val _currentChannelEpisodes = MutableStateFlow<List<PodcastEpisode>>(emptyList())
     val currentChannelEpisodes: StateFlow<List<PodcastEpisode>> = _currentChannelEpisodes.asStateFlow()
+
+    private val searchCache by lazy { PodcastCacheManager.getInstance(dbStorage) }
+    val searchCacheState: StateFlow<PodcastCacheManager.CacheState> = searchCache.cacheState
+
+    // Non-suspending versions for immediate access in composables
+    fun getCachedChannelTags(): List<String> = searchCache.cachedChannelTags
+    fun getCachedEpisodeTags(): List<String> = searchCache.cachedEpisodeTags
+    fun getCachedChannelResults(): List<PodcastChannelSearchItem> = searchCache.cachedChannelResults
+    fun getCachedEpisodeResults(): List<EpisodeSearchItem> = searchCache.cachedEpisodeResults
 
     private val _time = MutableStateFlow(GMTDate())
     val time: StateFlowClass<GMTDate> = _time
@@ -422,7 +433,7 @@ class ConferenceService(
                     _currentChannelEpisodes.value = result.items + _currentChannelEpisodes.value
                     _currentEpisodesCursor.value = Pair(result.prevCursor, _currentEpisodesCursor.value.second)
                 } else {
-                    _currentChannelEpisodes.value = _currentChannelEpisodes.value + result.items
+                    _currentChannelEpisodes.value += result.items
                     _currentEpisodesCursor.value = Pair(_currentEpisodesCursor.value.first, result.nextCursor)
                 }
             } catch (e: Exception) {
@@ -433,10 +444,161 @@ class ConferenceService(
 
     // Get all available tags with efficient database queries
     suspend fun getSessionTags(): List<String> = podcastRepository.getAllSessionTags()
-    suspend fun getChannelTags(): List<String> = podcastRepository.getAllChannelTags()
+    suspend fun getAllChannelTags(): List<String> {
+        return withContext(Dispatchers.IO) {
+            try {
+                // Try to get from cache first
+                if (searchCacheState.value == PodcastCacheManager.CacheState.LOADED) {
+                    val cachedTags = searchCache.getChannelTags()
+                    if (cachedTags.isNotEmpty()) {
+                        return@withContext cachedTags
+                    }
+                }
+
+                // Fall back to database
+                dbStorage.getAllUniqueChannelCategories()
+            } catch (e: Exception) {
+                println("Error getting channel tags: ${e.message}")
+                emptyList()
+            }
+        }
+    }
     suspend fun getEpisodeTags(): List<String> = podcastRepository.getAllEpisodeTags()
 
+    /**
+     * Get episode tags for a specific channel
+     */
+    suspend fun getEpisodeTagsForChannel(channelId: Long): List<String> {
+        return withContext(Dispatchers.IO) {
+            try {
+                // Get all unique tags from episodes in this channel
+                val tags = dbStorage.getEpisodeTagsForChannel(channelId)
 
+                // Cache the results for future use
+                searchCache.cacheEpisodeTagsForChannel(channelId, tags)
+
+                tags
+            } catch (e: Exception) {
+                println("Error getting episode tags for channel: ${e.message}")
+                emptyList()
+            }
+        }
+    }
+
+    suspend fun getEpisodeTagsForEpisodeBatch(episodeIds: List<String>): Map<String, List<String>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                // Convert string IDs to long IDs, skipping any that aren't valid numbers
+                val longIds = episodeIds.mapNotNull { it.toLongOrNull() }
+                if (longIds.isEmpty()) return@withContext emptyMap()
+
+                // First check the cache for any existing entries
+                val result = mutableMapOf<String, List<String>>()
+                val uncachedIds = mutableListOf<Long>()
+
+                longIds.forEach { id ->
+                    val stringId = id.toString()
+                    searchCache.getCachedEpisodeTags(stringId)?.let {
+                        // Found in cache
+                        result[stringId] = it
+                    } ?: run {
+                        // Not in cache, will need to fetch from DB
+                        uncachedIds.add(id)
+                    }
+                }
+
+                // If we have any uncached IDs, fetch them from the database
+                if (uncachedIds.isNotEmpty()) {
+                    val dbTags = dbStorage.getEpisodeTagsForEpisodes(uncachedIds)
+
+                    // Cache the results and add to our result map
+                    dbTags.forEach { (id, tags) ->
+                        val stringId = id.toString()
+                        result[stringId] = tags
+                        searchCache.cacheEpisodeTags(stringId, tags)
+                    }
+                }
+
+                return@withContext result
+            } catch (e: Exception) {
+                println("Error getting tags for episode batch: ${e.message}")
+                emptyMap()
+            }
+        }
+    }
+
+    /**
+     * Get tags for a specific episode - with memory caching
+     */
+    fun getEpisodeTags(episodeId: String): List<String> {
+        // Check cache first for better performance
+        searchCache.getCachedEpisodeTags(episodeId)?.let {
+            return it
+        }
+
+        val tags = try {
+            val result = dbStorage.getEpisodeTagsById(episodeId.toLong())
+            // Cache the result for future use
+            searchCache.cacheEpisodeTags(episodeId, result)
+            result
+        } catch (e: Exception) {
+            println("Error getting tags for episode $episodeId: ${e.message}")
+            emptyList()
+        }
+
+        return tags
+    }
+
+    /**
+     * Check if an episode matches the given tags - optimized with caching
+     */
+    fun doesEpisodeMatchTags(episodeId: String, tags: List<String>): Boolean {
+        if (tags.isEmpty()) return true
+
+        val episodeTags = getEpisodeTags(episodeId)
+        return episodeTags.any { episodeTag ->
+            tags.any { tag -> episodeTag.equals(tag, ignoreCase = true) }
+        }
+    }
+
+    /**
+     * Get episode position flow for UI components with more efficient access
+     */
+    fun getEpisodePositionFlow(episodeId: Long): Flow<Long?> {
+        return dbStorage.getEpisodePositionFlow(episodeId)
+    }
+
+    /**
+     * Ensure channel is loaded - helpful for direct navigation
+     */
+    fun ensureChannelLoaded(channelId: Long) {
+        // Check if we already have this channel in our list
+        val existingChannel = _podcastChannels.value.find { it.id == channelId }
+
+        if (existingChannel != null) {
+            // Channel is already loaded, nothing to do
+            return
+        }
+
+        // Launch a coroutine to load the channel
+        launch(Dispatchers.IO) {
+            try {
+                val channel = dbStorage.getChannelById(channelId)
+
+                if (channel != null) {
+                    // Add this channel to our list
+                    _podcastChannels.value = _podcastChannels.value + channel
+
+                    // Also preload episodes for this channel in the background
+                    loadEpisodesForChannel(channelId)
+                } else {
+                    println("Could not find channel with ID $channelId")
+                }
+            } catch (e: Exception) {
+                println("Error ensuring channel is loaded: ${e.message}")
+            }
+        }
+    }
 
     // Main search method that delegates to specific search implementations
     suspend fun searchContent(
@@ -453,24 +615,36 @@ class ConferenceService(
         return try {
             withContext(Dispatchers.IO) {
                 when (searchTab) {
-                    SearchTab.TALKS -> {
-                        // For talks we keep the old page-based approach for now
-                        val pageSize = limit
-                        val page = cursor?.toIntOrNull() ?: 0
-                        searchSessionsForUI(query, activeTags, page, pageSize)
+                    SearchTab.PODCASTS -> {
+                        // For podcast channels, use direct DB search for better performance
+                        val result = podcastRepository.searchChannelsFTS(
+                            query = query,
+                            tags = activeTags,
+                            cursor = cursor?.toLongOrNull(),
+                            limit = limit,
+                            backward = backward
+                        )
+
+                        // Convert to PaginatedResult
+                        PaginatedResult(
+                            items = result.items,
+                            totalCount = -1,
+                            hasMore = result.hasMore,
+                            nextPage = null,
+                            nextCursor = result.nextCursor,
+                            prevCursor = result.prevCursor
+                        )
                     }
-                    SearchTab.PODCASTS -> searchChannelsForUI(
-                        query, activeTags, cursor, limit, backward
-                    )
-                    SearchTab.EPISODES -> searchEpisodesForUI(
-                        query, activeTags, cursor, limit, backward
-                    )
+                    SearchTab.EPISODES -> searchEpisodesForUI(query, activeTags, cursor, limit, backward)
+                    SearchTab.TALKS -> {
+                        val page = cursor?.toIntOrNull() ?: 0
+                        searchSessionsForUI(query, activeTags, page, limit)
+                    }
                 }
             }
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
             println("Search error: ${e.message}")
+            e.printStackTrace()
             PaginatedResult(
                 items = emptyList<Any>(),
                 totalCount = 0,
@@ -807,8 +981,11 @@ class ConferenceService(
                 launch {
                     syncVotes()
                     syncFavorites()
-                    syncManager.startSync()
                     updateConferenceData()
+                    // Listen for data change events - pass syncManager as parameter
+                    listenForDataChanges(syncManager)
+                    // Start sync process
+                    syncManager.startSync()
                     startPodcastChannelsSync()
                     loadChannelsWithCursor(limit = 20)
                 }
@@ -852,7 +1029,6 @@ class ConferenceService(
         )
 
         // Launch a coroutine to give UI time to show the completion state
-        // before transitioning to the READY state
         launch {
             // Brief delay so user can see completion message
             delay(1000)
@@ -860,7 +1036,39 @@ class ConferenceService(
             // Now update the app state to READY which triggers transition to main screen
             databaseImported = true
             _appInitState.value = AppInitState.READY
+
+            // Initialize search cache in the background
+            // This happens AFTER the app is in the READY state, so it won't block the UI
+            launch(Dispatchers.Default) {
+                searchCache.initialize()
+            }
         }
+    }
+
+    suspend fun getChannelTagsFromCache(): List<String> {
+        // Try to get from cache first
+        if (searchCacheState.value == PodcastCacheManager.CacheState.LOADED) {
+            val cachedTags = searchCache.getChannelTags()
+            if (cachedTags.isNotEmpty()) {
+                return cachedTags
+            }
+        }
+
+        // Fall back to database
+        return dbStorage.getAllUniqueChannelCategories()
+    }
+
+    suspend fun getEpisodeTagsFromCache(): List<String> {
+        // Try to get from cache first
+        if (searchCacheState.value == PodcastCacheManager.CacheState.LOADED) {
+            val cachedTags = searchCache.getEpisodeTags()
+            if (cachedTags.isNotEmpty()) {
+                return cachedTags
+            }
+        }
+
+        // Fall back to database
+        return dbStorage.getAllUniqueEpisodeCategories()
     }
 
 
@@ -890,6 +1098,36 @@ class ConferenceService(
         notificationsAllowed = true
         notificationManager.requestPermission()
     }
+
+    private fun listenForDataChanges(syncManager: SyncManager) {
+        launch {
+            syncManager.dataChangeEvents.collect { event ->
+                when (event) {
+                    is DataChangeEvent.SessionsChanged -> {
+                        println("Sessions changed, updating conference data")
+                        updateConferenceData()
+                    }
+                    is DataChangeEvent.SpeakersChanged -> {
+                        println("Speakers changed, updating conference data")
+                        updateConferenceData()
+                    }
+                    is DataChangeEvent.FavoritesChanged -> {
+                        // No specific action needed as favorites are handled through flow collection
+                        println("Favorites changed (handled by flow)")
+                    }
+                    is DataChangeEvent.VotesChanged -> {
+                        // No specific action needed as votes are handled through flow collection
+                        println("Votes changed (handled by flow)")
+                    }
+                    is DataChangeEvent.PodcastsChanged -> {
+                        println("Podcasts changed, updating podcast data")
+                    }
+                }
+            }
+        }
+    }
+
+
 
     /**
      * Vote for session.
@@ -934,7 +1172,7 @@ class ConferenceService(
 
     fun speakerById(id: String): Speaker = speakers.value[id] ?: UNKNOWN_SPEAKER
 
-    fun sessionById(id: String): SessionCardView =
+    private fun sessionById(id: String): SessionCardView =
         sessionCards.value.find { it.id == id } ?: UNKNOWN_SESSION_CARD
 
     fun sessionsForSpeaker(id: String): List<SessionCardView> =
@@ -1018,7 +1256,7 @@ class ConferenceService(
         }
     }
 
-    private suspend fun isDatabaseEmpty(): Boolean {
+    private fun isDatabaseEmpty(): Boolean {
         // Check for podcast channels as an indicator
         val channelCount = database.sessionDatabaseQueries
             .selectAllChannels()

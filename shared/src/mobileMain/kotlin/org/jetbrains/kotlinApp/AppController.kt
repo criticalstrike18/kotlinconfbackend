@@ -2,6 +2,7 @@ package org.jetbrains.kotlinApp
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import kotlinx.coroutines.DelicateCoroutinesApi
@@ -111,9 +112,18 @@ class AppController(internal val service: ConferenceService, private val podcast
 
     fun showPodcastScreen(channelId: Long) {
         push {
-            // We collect the relevant state from the ViewModel or pass it in
+            // We collect the relevant state from the ViewModel
             val playerState by podcastViewModel.playerState.collectAsState()
             val playbackState by podcastViewModel.playbackState.collectAsState()
+
+            // Ensure we have the channel data and episodes preloaded
+            LaunchedEffect(channelId) {
+                // This ensures the channel is loaded with all details
+                service.ensureChannelLoaded(channelId)
+
+                // Load episodes for this channel
+                service.loadEpisodesForChannel(channelId)
+            }
 
             PodcastScreen(
                 service = service,
@@ -128,13 +138,13 @@ class AppController(internal val service: ConferenceService, private val podcast
                     }
                 },
                 channelId = channelId,
-                onSeek = podcastViewModel::seekTo,
-                onSpeedChange = podcastViewModel::setSpeed,
-                onBoostChange = podcastViewModel::enableBoost,
                 onBackPress = { back() },
                 onExpandPlayer = {
                     showPodcastFullPlayer()
-                }
+                },
+                onSeek = podcastViewModel::seekTo,
+                onSpeedChange = podcastViewModel::setSpeed,
+                onBoostChange = podcastViewModel::enableBoost
             )
         }
     }
@@ -322,7 +332,7 @@ class AppController(internal val service: ConferenceService, private val podcast
         }
     }
 
-    private fun refreshData() {
+    fun refreshData() {
         // Trigger any necessary data refresh after session creation
         service.updateConferenceData()
     }

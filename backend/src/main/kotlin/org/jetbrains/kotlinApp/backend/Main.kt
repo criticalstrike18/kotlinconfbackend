@@ -36,7 +36,6 @@ fun Application.conferenceBackend() {
     log.info("Environment: $mode")
     val sessionizeConfig = config.config("sessionize")
     val imagesUrl = sessionizeConfig.property("imagesUrl").getString()
-    val sessionizeUrl = sessionizeConfig.property("url").getString()
     val sessionizeInterval = sessionizeConfig.property("interval").getString().toLong()
     val adminSecret = serviceConfig.property("secret").getString()
     val production = mode == "production"

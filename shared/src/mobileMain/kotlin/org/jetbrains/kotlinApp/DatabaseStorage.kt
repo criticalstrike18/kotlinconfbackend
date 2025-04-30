@@ -7,6 +7,7 @@ import app.cash.sqldelight.coroutines.mapToOneOrNull
 import io.ktor.util.date.GMTDate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -951,6 +952,75 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
             .mapToOne(Dispatchers.IO)
     }
 
+    suspend fun getChannelById(channelId: Long): GetAllChannelDetails? = withContext(Dispatchers.IO) {
+        dbMutex.withLock {
+            try {
+                database.sessionDatabaseQueries.getAllChannelDetailsById(
+                    channelId = channelId,
+                    mapper = { id, title, link, description, copyright, language, author,
+                               ownerEmail, ownerName, imageUrl, lastBuildDate, episodeCount,
+                               earliestEpisodePubDate, latestEpisodePubDate, categories ->
+                        GetAllChannelDetails(
+                            id = id,
+                            title = title,
+                            link = link,
+                            description = description,
+                            copyright = copyright,
+                            language = language,
+                            author = author,
+                            ownerEmail = ownerEmail,
+                            ownerName = ownerName,
+                            imageUrl = imageUrl,
+                            lastBuildDate = lastBuildDate,
+                            episodeCount = episodeCount,
+                            earliestEpisodePubDate = earliestEpisodePubDate,
+                            latestEpisodePubDate = latestEpisodePubDate,
+                            categories = categories
+                        )
+                    }
+                ).executeAsOneOrNull()
+            } catch (e: Exception) {
+                println("Error getting channel by ID $channelId: ${e.message}")
+                null
+            }
+        }
+    }
+
+    /**
+     * Get all episode tags for a specific channel
+     */
+    suspend fun getEpisodeTagsForChannel(channelId: Long): List<String> = withContext(Dispatchers.IO) {
+        try {
+            // Simple query to get all tags from this channel's episodes
+            database.sessionDatabaseQueries.getChannelEpisodeTags(channelId)
+                .executeAsList()
+                .flatMap { it?.split(",") ?: emptyList() }
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+        } catch (e: Exception) {
+            println("Error getting episode tags for channel: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Get tags for a specific episode - optimized query
+     */
+    fun getEpisodeTagsById(episodeId: Long): List<String> {
+        return try {
+            // Get episode categories
+            val categories = database.sessionDatabaseQueries.getEpisodeTagsById(episodeId)
+                .executeAsList()
+
+            // Flatten and clean up
+            categories.filterNotNull()
+                .distinct()
+        } catch (e: Exception) {
+            println("Error getting tags for episode $episodeId: ${e.message}")
+            emptyList()
+        }
+    }
 
     fun getEpisodePosition(episodeId: Long): Long? {
         // Return the stored position, if any. If no record found, returns null.
@@ -960,6 +1030,9 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
             ?.position_ms
     }
 
+    /**
+     * Get episode position flow with better error handling
+     */
     fun getEpisodePositionFlow(episodeId: Long): Flow<Long?> {
         // The query selectEpisodeProgressById returns the row if it exists.
         return database.sessionDatabaseQueries
@@ -967,6 +1040,42 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
             .asFlow()
             .mapToOneOrNull(Dispatchers.IO)
             .map { it?.position_ms }  // We only need the "position_ms" field
+            .catch { error ->
+                // Log error but don't crash
+                println("Error getting episode position: ${error.message}")
+                emit(null)
+            }
+    }
+
+    /**
+     * Optimized batch fetch of episode tags
+     */
+    suspend fun getEpisodeTagsForEpisodes(episodeIds: List<Long>): Map<Long, List<String>> = withContext(Dispatchers.IO) {
+        if (episodeIds.isEmpty()) return@withContext emptyMap()
+
+        dbMutex.withLock {
+            try {
+                val result = mutableMapOf<Long, List<String>>()
+
+                // Process in batches of 50 to avoid SQLite parameter limits
+                episodeIds.chunked(50).forEach { chunk ->
+                    // For each episode in this chunk, get its tags
+                    chunk.forEach { episodeId ->
+                        val tags = database.sessionDatabaseQueries.getEpisodeTagsById(episodeId)
+                            .executeAsList()
+                            .filterNotNull()
+                            .distinct()
+
+                        result[episodeId] = tags
+                    }
+                }
+
+                result
+            } catch (e: Exception) {
+                println("Error getting episode tags in batch: ${e.message}")
+                emptyMap()
+            }
+        }
     }
 
     /**
@@ -1161,13 +1270,10 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
         cursor: Long? = null,
         limit: Int = 20
     ): Flow<List<PodcastEpisodes>> {
-        return database.sessionDatabaseQueries.getEpisodesForChannelCursor(
+        return database.sessionDatabaseQueries.getEpisodesForChannelCursor_Updated(
             channelId = channelId,
             cursor = cursor,
-            limit = limit.toLong(),
-            mapper = { id, channelId_, guid, title, description, link, pubDate, duration, explicit, imageUrl, mediaUrl, mediaType, mediaLength ->
-                PodcastEpisodes(id, channelId_, guid, title, description, link, pubDate, duration, explicit, imageUrl, mediaUrl, mediaType, mediaLength)
-            }
+            limit = limit.toLong()
         )
             .asFlow()
             .mapToList(Dispatchers.IO)
@@ -1257,6 +1363,128 @@ private suspend fun upsertChannelData(channelData: ChannelFullData) = withContex
             } catch (e: Exception) {
                 println("Error searching episodes by category: ${e.message}")
                 emptyList()
+            }
+        }
+    }
+
+    // Get all unique channel categories
+    suspend fun getAllUniqueChannelCategories(): List<String> = withContext(Dispatchers.IO) {
+        try {
+            database.sessionDatabaseQueries.getAllUniqueChannelCategories()
+                .executeAsList()
+        } catch (e: Exception) {
+            println("Error getting unique channel categories: ${e.message}")
+            emptyList()
+        }
+    }
+
+    // Get all unique episode categories
+    suspend fun getAllUniqueEpisodeCategories(): List<String> = withContext(Dispatchers.IO) {
+        try {
+            database.sessionDatabaseQueries.getAllUniqueEpisodeCategories()
+                .executeAsList()
+        } catch (e: Exception) {
+            println("Error getting unique episode categories: ${e.message}")
+            emptyList()
+        }
+    }
+
+    // Data class for episodes with channel names
+    data class EpisodeWithChannel(
+        val episode: PodcastEpisodes,
+        val channelTitle: String
+    )
+
+    // Get episodes across all channels
+    suspend fun getEpisodesAcrossChannels(limit: Int = 100): List<EpisodeWithChannel> = withContext(Dispatchers.IO) {
+        try {
+            database.sessionDatabaseQueries.getEpisodesAcrossChannels(
+                channelId = -1,
+                limit = limit.toLong()
+            ).executeAsList().map { row ->
+                EpisodeWithChannel(
+                    episode = PodcastEpisodes(
+                        id = row.id,
+                        channelId = row.channelId,
+                        guid = row.guid,
+                        title = row.title,
+                        description = row.description,
+                        link = row.link,
+                        pubDate = row.pubDate,
+                        duration = row.duration,
+                        explicit = row.explicit,
+                        imageUrl = row.imageUrl,
+                        mediaUrl = row.mediaUrl,
+                        mediaType = row.mediaType,
+                        mediaLength = row.mediaLength
+                    ),
+                    channelTitle = row.channelTitle
+                )
+            }
+        } catch (e: Exception) {
+            println("Error getting episodes across channels: ${e.message}")
+            emptyList()
+        }
+    }
+
+    // Get channel categories by IDs
+    suspend fun getChannelCategoriesByIds(channelIds: List<Long>): Map<String, List<String>> {
+        if (channelIds.isEmpty()) return emptyMap()
+
+        return withContext(Dispatchers.IO) {
+            try {
+                val result = mutableMapOf<String, List<String>>()
+
+                // Process in batches to avoid SQLite parameter limits
+                channelIds.chunked(50).forEach { chunk ->
+                    database.sessionDatabaseQueries.getChannelCategories(chunk)
+                        .executeAsList()
+                        .forEach { row ->
+                            val categoryList = row.categories
+                                ?.split(",")
+                                ?.map { it.trim() }
+                                ?.filter { it.isNotBlank() }
+                                ?: emptyList()
+
+                            result[row.channelId.toString()] = categoryList
+                        }
+                }
+
+                result
+            } catch (e: Exception) {
+                println("Error getting channel categories by IDs: ${e.message}")
+                emptyMap()
+            }
+        }
+    }
+
+    // Get episode categories by IDs
+    suspend fun getEpisodeCategoriesByIds(episodeIds: List<Long>): Map<String, List<String>> {
+        if (episodeIds.isEmpty()) return emptyMap()
+
+        return withContext(Dispatchers.IO) {
+            try {
+                val result = mutableMapOf<String, List<String>>()
+
+                // Process in batches to avoid SQLite parameter limits
+                episodeIds.chunked(50).forEach { chunk ->
+                    database.sessionDatabaseQueries.getEpisodeCategories(chunk)
+                        .executeAsList()
+                        .forEach { row ->
+                            val categoryList = row.categories
+                                ?.split(",")
+                                ?.map { it.trim() }
+                                ?.filter { it.isNotBlank() }
+                                ?: emptyList()
+
+                            result[row.episodeId.toString()] = categoryList
+                        }
+                }
+
+                result
+            } catch (e: Exception) {
+                println("Error getting episode categories by IDs: ${e.message}")
+                emptyMap()
             }
         }
     }

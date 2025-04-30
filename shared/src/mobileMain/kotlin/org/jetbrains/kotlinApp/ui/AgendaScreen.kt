@@ -1,5 +1,3 @@
-@file:OptIn(ExperimentalResourceApi::class)
-
 package org.jetbrains.kotlinApp.ui
 
 import androidx.compose.foundation.background
@@ -21,6 +19,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -31,7 +30,6 @@ import kotlinconfapp.shared.generated.resources.Res
 import kotlinconfapp.shared.generated.resources.lunch
 import kotlinconfapp.shared.generated.resources.lunch_active
 import kotlinx.coroutines.launch
-import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.kotlinApp.Agenda
 import org.jetbrains.kotlinApp.AppController
 import org.jetbrains.kotlinApp.Day
@@ -54,27 +52,42 @@ fun AgendaScreen(agenda: Agenda, scrollState: LazyListState, controller: AppCont
     val daysSize = agenda.days.map { it.itemsCount() }
     val daysIndex: List<Int> = daysSize.scan(0) { acc, i -> acc + i }
 
+    // Track the last known visible day to prevent disappearing
+    val lastKnownDay = remember { mutableStateOf<EventDay?>(EventDay.Today) }
+
     val displayedDay: EventDay? by remember {
         derivedStateOf {
-            val visibleKeys: List<String> = scrollState.layoutInfo.visibleItemsInfo.mapNotNull {
-                it.key as? String
-            }
+            // Get all visible item keys
+            val keys = scrollState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }
 
-            // e.g. you might see "header-Passed", "header-Today", "header-Later", etc.
-            val categoriesSeen: Set<EventDay> = visibleKeys.mapNotNull { key ->
-                if (key.startsWith("header-")) {
-                    val suffix = key.removePrefix("header-") // e.g. "Passed"
-                    // Attempt to parse it as an EventDay enum
-                    runCatching { EventDay.valueOf(suffix) }.getOrNull()
-                } else null
+            // Extract day information from keys
+            val days = keys.mapNotNull { key ->
+                when {
+                    key.startsWith("header-") -> {
+                        // Day headers (explicit format)
+                        val dayString = key.substringAfter("header-")
+                        EventDay.entries.find { it.name == dayString }
+                    }
+                    key.contains("-day") -> {
+                        // Items with day info embedded
+                        val dayIndex = key.lastIndexOf("-day")
+                        if (dayIndex >= 0) {
+                            val dayString = key.substring(dayIndex + 1)
+                            EventDay.entries.find { it.name == dayString }
+                        } else null
+                    }
+                    else -> null
+                }
             }.toSet()
 
-            // If none are visible, return null
-            if (categoriesSeen.isEmpty()) {
-                null
+            // If we found visible days, use the topmost one
+            if (days.isNotEmpty()) {
+                val currentDay = days.minBy { it.ordinal }
+                lastKnownDay.value = currentDay // Update last known day
+                currentDay
             } else {
-                // For multiple, pick the first in ascending ordinal
-                categoriesSeen.minByOrNull { it.ordinal }
+                // If no day headers visible, use last known day
+                lastKnownDay.value
             }
         }
     }
@@ -146,19 +159,21 @@ private fun LiveHeader(liveSlot: TimeSlot, scrollToLive: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalResourceApi::class)
 private fun LazyListScope.SessionsList(
     day: Day,
     controller: AppController,
 ) {
-    // 1) Insert a day header (the banner)
-    item("header-${day.day}") {
-        AgendaDayHeader(day) // Now passing entire 'Day'
+    // The day name will be used in all keys
+    val dayName = day.day.name
+
+    // 1) Insert a day header
+    item(key = "header-$dayName") {
+        AgendaDayHeader(day)
     }
 
     // 2) If no time slots => show a "No events here" row
     if (day.timeSlots.isEmpty()) {
-        item("no-events-${day.day}") {
+        item(key = "no-events-$dayName") {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -171,15 +186,15 @@ private fun LazyListScope.SessionsList(
                 )
             }
         }
-        return // Done
+        return
     }
 
-    // 3) Otherwise, show each time slot
+    // 3) Process each time slot - embed day info in all keys
     day.timeSlots.forEach { slot ->
         when {
             slot.isLunch -> {
                 if (slot.isFinished) return@forEach
-                item(slot.key) {
+                item(key = "${slot.key}-$dayName") {
                     Break(
                         duration = slot.duration,
                         title = slot.title,
@@ -189,29 +204,40 @@ private fun LazyListScope.SessionsList(
                     )
                 }
             }
+
             slot.isBreak -> {
                 if (slot.isFinished) return@forEach
-                item(slot.key) {
-                    Break(duration = slot.duration, title = slot.title, isLive = slot.isLive)
+                item(key = "${slot.key}-$dayName") {
+                    Break(
+                        duration = slot.duration,
+                        title = slot.title,
+                        isLive = slot.isLive
+                    )
                 }
             }
+
             slot.isParty -> {
-                item(slot.key) {
+                item(key = "${slot.key}-$dayName") {
                     Column {
                         AgendaTimeSlotHeader(slot.title, slot.isLive, slot.isFinished)
                         Party(slot.title, slot.isFinished)
                     }
                 }
             }
+
             else -> {
-                // Normal talk session
-                item(slot.key) {
+                // Regular session time slot
+                item(key = "${slot.key}-$dayName") {
                     AgendaTimeSlotHeader(
                         slot.title, slot.isLive, slot.isFinished
                     )
                 }
 
-                items(slot.sessions, key = { it.key }) { session ->
+                // Each session also gets the day embedded in its key
+                items(
+                    items = slot.sessions,
+                    key = { "${it.key}-$dayName" }
+                ) { session ->
                     AgendaItem(
                         title = session.title,
                         speakerLine = session.speakerLine,

@@ -39,16 +39,18 @@ services:
     restart: unless-stopped
 
   importService:
-    image: criticalstrike/bulkimportservice:latest
+    image: criticalstrike/bulk-export-import:latest
     ports:
       - "8000:8000"
     environment:
+      - STORAGE_DIR=/app/storage
       - PORT=8000
-      - DATABASE_HOST=db
-      - DATABASE_PORT=5432
-      - DATABASE_NAME=kotlinconfg
-      - DATABASE_USER=postgres
-      - DATABASE_PASSWORD=postgres
+      - PG_HOST=db
+      - PG_PORT=5432
+      - PG_DBNAME=kotlinconfg
+      - PG_USER=postgres
+      - PG_PASSWORD=postgres
+      - BACKEND_URL=http://backend:8080
     depends_on:
       - db
     networks:

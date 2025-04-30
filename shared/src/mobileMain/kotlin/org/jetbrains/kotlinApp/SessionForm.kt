@@ -1,10 +1,7 @@
-@file:OptIn(ExperimentalLayoutApi::class)
-
 package org.jetbrains.kotlinApp
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,10 +26,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.ktor.util.date.GMTDate
 import io.ktor.util.date.Month
-import kotlinconfapp.shared.generated.resources.Res
 import kotlinx.coroutines.launch
 import kotlinx.datetime.Instant
 import kotlinx.datetime.LocalDate
@@ -144,7 +139,7 @@ fun SessionForm(service: ConferenceService, onSessionCreated: () -> Unit) {
             label = { Text("Description") },
             modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions.Default.copy(imeAction = ImeAction.Next),
-            textStyle = TextStyle(fontSize = 1.sp ,color = MaterialTheme.colors.onSurface)
+            textStyle = TextStyle(color = MaterialTheme.colors.onSurface)
         )
         Spacer(modifier = Modifier.height(6.dp))
 

@@ -2,6 +2,7 @@
 allprojects {
     repositories {
         maven("https://maven.pkg.jetbrains.space/public/p/ktor/eap")
+        maven { url = uri("https://jitpack.io") }
         google()
         mavenCentral()
     }

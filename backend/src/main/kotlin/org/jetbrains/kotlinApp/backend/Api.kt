@@ -5,6 +5,7 @@ package org.jetbrains.kotlinApp.backend
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
+import io.ktor.server.application.log
 import io.ktor.server.auth.principal
 import io.ktor.server.plugins.NotFoundException
 import io.ktor.server.request.receive
@@ -25,6 +26,7 @@ import org.jetbrains.kotlinApp.RoomResponse
 import org.jetbrains.kotlinApp.SessionCategoriesRequest
 import org.jetbrains.kotlinApp.SessionResponse
 import org.jetbrains.kotlinApp.SessionSpeakerRequest
+import org.jetbrains.kotlinApp.Unauthorized
 import org.jetbrains.kotlinApp.VoteInfo
 import org.jetbrains.kotlinApp.Votes
 import java.time.Clock
@@ -43,6 +45,7 @@ internal fun Route.api(
     apiSessionizeImagesProxy(imagesUrl)
     sessionManagementApi(store,adminSecret)
     podcastRoutes(store, adminSecret)
+    syncApi(store)
 }
 
 /*
@@ -209,7 +212,7 @@ private suspend fun ApplicationCall.validatePrincipal(database: Store): KotlinCo
 private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
     // Protected endpoint: require validatePrincipal
     get("get/sessions") {
-        call.validatePrincipal(database) ?: throw Unauthorized()
+//        call.validatePrincipal(database) ?: throw Unauthorized()
         try {
             val sessionsData = database.getAllSessions()
             call.respond(sessionsData)
@@ -219,7 +222,7 @@ private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
     }
 
     get("get/categories") {
-        call.validatePrincipal(database) ?: throw Unauthorized()
+//        call.validatePrincipal(database) ?: throw Unauthorized()
         try {
             val categoriesData = database.getAllCategories()
             call.respond(categoriesData)
@@ -230,7 +233,7 @@ private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
 
     get("get/rooms") {
         // Validate that the user is authorized via the Bearer token.
-        call.validatePrincipal(database) ?: throw Unauthorized()
+//        call.validatePrincipal(database) ?: throw Unauthorized()
 
         try {
             val roomsData = database.getAllRooms()
@@ -241,7 +244,7 @@ private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
     }
 
     get("get/speakers") {
-        call.validatePrincipal(database) ?: throw Unauthorized()
+//        call.validatePrincipal(database) ?: throw Unauthorized()
         try {
             val speakersData = database.getAllSpeakers()
             call.respond(speakersData)
@@ -251,7 +254,7 @@ private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
     }
 
     get("get/session-speakers") {
-        call.validatePrincipal(database) ?: throw Unauthorized()
+//        call.validatePrincipal(database) ?: throw Unauthorized()
         try {
             val sessions = database.getAllSessions()
             val sessionSpeakers = sessions.associate { session ->
@@ -264,7 +267,7 @@ private fun Route.sessionManagementApi(database: Store, adminSecret: String) {
     }
 
     get("get/session-categories") {
-        call.validatePrincipal(database) ?: throw Unauthorized()
+//        call.validatePrincipal(database) ?: throw Unauthorized()
         try {
             val sessions = database.getAllSessions()
             val sessionCategories = sessions.associate { session ->
@@ -474,6 +477,82 @@ private fun Route.podcastRoutes(database: Store, adminSecret: String) {
         } catch (e: Exception) {
             e.printStackTrace()
             call.respond(HttpStatusCode.InternalServerError, "Failed to fetch data: ${e.message}")
+        }
+    }
+}
+
+private fun Route.syncApi(store: Store) {
+    route("sync") {
+        // Endpoint for getting sessions changed since a timestamp
+        get("/sessions") {
+            call.validatePrincipal(store) ?: throw Unauthorized()
+            val sinceTimestamp = call.parameters["since"]?.toLongOrNull() ?: 0L
+
+            try {
+                val sessions = store.getSessionsChangedSince(sinceTimestamp)
+                call.respond(sessions)
+            } catch (e: Exception) {
+                call.application.log.error("Error fetching sessions: ${e.message}", e)
+                call.respond(HttpStatusCode.InternalServerError, "Failed to get sessions: ${e.message}")
+            }
+        }
+
+        // Endpoint for getting speakers changed since a timestamp
+        get("/speakers") {
+            call.validatePrincipal(store) ?: throw Unauthorized()
+            val sinceTimestamp = call.parameters["since"]?.toLongOrNull() ?: 0L
+
+            try {
+                val speakers = store.getSpeakersChangedSince(sinceTimestamp)
+                call.respond(speakers)
+            } catch (e: Exception) {
+                call.application.log.error("Error fetching speakers: ${e.message}", e)
+                call.respond(HttpStatusCode.InternalServerError, "Failed to get speakers: ${e.message}")
+            }
+        }
+
+        // Endpoint for getting rooms changed since a timestamp
+        get("/rooms") {
+            call.validatePrincipal(store) ?: throw Unauthorized()
+            val sinceTimestamp = call.parameters["since"]?.toLongOrNull() ?: 0L
+
+            try {
+                val rooms = store.getRoomsChangedSince(sinceTimestamp)
+                call.respond(rooms)
+            } catch (e: Exception) {
+                call.application.log.error("Error fetching rooms: ${e.message}", e)
+                call.respond(HttpStatusCode.InternalServerError, "Failed to get rooms: ${e.message}")
+            }
+        }
+
+        // Endpoint for getting categories changed since a timestamp
+        get("/categories") {
+            call.validatePrincipal(store) ?: throw Unauthorized()
+            val sinceTimestamp = call.parameters["since"]?.toLongOrNull() ?: 0L
+
+            try {
+                val categories = store.getCategoriesChangedSince(sinceTimestamp)
+                call.respond(categories)
+            } catch (e: Exception) {
+                call.application.log.error("Error fetching categories: ${e.message}", e)
+                call.respond(HttpStatusCode.InternalServerError, "Failed to get categories: ${e.message}")
+            }
+        }
+
+        // Endpoint for getting podcasts changed since a timestamp
+        get("/podcasts") {
+            call.validatePrincipal(store) ?: throw Unauthorized()
+            val sinceTimestamp = call.parameters["since"]?.toLongOrNull() ?: 0L
+
+            try {
+                val podcasts = store.getPodcastsChangedSince(sinceTimestamp)
+                // Use ProtoBuf for efficiency with large data
+                val byteArray = ProtoBuf.encodeToByteArray(podcasts)
+                call.respondBytes(byteArray, ContentType.Application.ProtoBuf)
+            } catch (e: Exception) {
+                call.application.log.error("Error fetching podcasts: ${e.message}", e)
+                call.respond(HttpStatusCode.InternalServerError, "Failed to get podcasts: ${e.message}")
+            }
         }
     }
 }

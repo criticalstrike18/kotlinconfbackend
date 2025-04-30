@@ -13,7 +13,9 @@ import com.seiko.imageloader.LocalImageLoader
 import org.jetbrains.kotlinApp.podcast.PodcastViewModel
 import org.jetbrains.kotlinApp.ui.MainScreen
 import org.jetbrains.kotlinApp.ui.theme.KotlinConfTheme
-const val ip = "192.168.43.253"
+
+//Backend Config
+const val ip = "192.168.29.31"
 const val apiEndpoint = "http://$ip:8080"
 const val importEndpoint = "http://$ip:8000"
 

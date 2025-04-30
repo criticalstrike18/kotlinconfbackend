@@ -20,11 +20,9 @@ import kotlinconfapp.shared.generated.resources.arrow_right
 import kotlinconfapp.shared.generated.resources.hashtag
 import kotlinconfapp.shared.generated.resources.menu
 import kotlinconfapp.shared.generated.resources.mobile_app
-import kotlinconfapp.shared.generated.resources.partners
 import kotlinconfapp.shared.generated.resources.search
 import kotlinconfapp.shared.generated.resources.slack
 import kotlinconfapp.shared.generated.resources.x
-import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.stringResource
 import org.jetbrains.kotlinApp.AppController
 import org.jetbrains.kotlinApp.ui.components.BigMenuItem
@@ -33,10 +31,10 @@ import org.jetbrains.kotlinApp.ui.components.MenuLogo
 import org.jetbrains.kotlinApp.ui.components.NavigationBar
 import org.jetbrains.kotlinApp.ui.theme.grey20Grey80
 
-@OptIn(ExperimentalResourceApi::class)
 @Composable
 fun MenuScreen(controller: AppController) {
     val uriHandler = LocalUriHandler.current
+    controller.refreshData()
     Column(Modifier.fillMaxWidth()) {
         NavigationBar(
             title = stringResource(Res.string.menu),
@@ -72,13 +70,6 @@ fun MenuScreen(controller: AppController) {
                         icon = Res.drawable.arrow_right
                     ) {
                         controller.showAppInfo()
-                    }
-                    HDivider()
-                    MenuItem(
-                        text = stringResource(Res.string.partners),
-                        icon = Res.drawable.arrow_right
-                    ) {
-                        controller.showPartners()
                     }
                     HDivider()
                     MenuItem(

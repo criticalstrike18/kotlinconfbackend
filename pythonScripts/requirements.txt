@@ -1,0 +1,20 @@
+# Core dependencies for database operations
+psycopg2-binary==2.9.9  # PostgreSQL adapter (binary version for easier installation in slim images)
+requests==2.31.0        # For HTTP requests to check backend availability
+
+# FastAPI and related web server dependencies
+fastapi==0.112.2        # FastAPI framework (compatible with Python 3.9)
+uvicorn==0.30.6         # ASGI server to run FastAPI
+aiofiles==23.2.1        # Asynchronous file operations for streaming
+
+# Scheduling
+apscheduler==3.10.4     # Background scheduler for periodic exports
+
+# Logging and utilities (already in Python standard library, no need to install)
+# - logging
+# - os
+# - time
+# - datetime
+
+# Optional: For better performance and compatibility
+python-multipart==0.0.9  # Optional for FastAPI if you plan to add file uploads later

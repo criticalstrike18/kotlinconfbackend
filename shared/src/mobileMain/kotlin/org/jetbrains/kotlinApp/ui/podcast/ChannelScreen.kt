@@ -1,15 +1,11 @@
-@file:OptIn(FlowPreview::class)
-
 package org.jetbrains.kotlinApp.ui.podcast
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -18,42 +14,41 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.CircularProgressIndicator
-import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.MaterialTheme
-import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinconfapp.shared.generated.resources.Res
+import kotlinconfapp.shared.generated.resources.back
+import kotlinconfapp.shared.generated.resources.search
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import org.jetbrains.kotlinApp.ConferenceService
+import org.jetbrains.kotlinApp.PodcastChannelSearchItem
 import org.jetbrains.kotlinApp.podcast.PlayerState
 import org.jetbrains.kotlinApp.podcast.PodcastEpisode
 import org.jetbrains.kotlinApp.podcast.PodcastPlaybackState
 import org.jetbrains.kotlinApp.ui.HDivider
-import org.jetbrains.kotlinApp.ui.components.AsyncImage
+import org.jetbrains.kotlinApp.ui.SearchTab
 import org.jetbrains.kotlinApp.ui.components.NavigationBar
-import org.jetbrains.kotlinApp.ui.theme.grey50
-import org.jetbrains.kotlinApp.ui.theme.greyGrey5
-import org.jetbrains.kotlinApp.ui.theme.greyWhite
+import org.jetbrains.kotlinApp.ui.components.SearchField
+import org.jetbrains.kotlinApp.ui.components.SearchSessionTags
+import org.jetbrains.kotlinApp.ui.podcast.components.ChannelCard
 import org.jetbrains.kotlinApp.ui.theme.whiteGrey
-import org.jetbrains.kotlinApp.utils.Screen
-import org.jetbrains.kotlinApp.utils.isTooWide
 import org.jetbrains.kotlinconf.GetAllChannelDetails
 
 
@@ -62,13 +57,14 @@ sealed class PodcastNavigation {
     data class Episodes(val channelId: Long) : PodcastNavigation()
 }
 
-private fun formatDateForChannelScreen(timestamp: Long): String {
+internal fun formatDateForChannelScreen(timestamp: Long): String {
     val instant = Instant.fromEpochMilliseconds(timestamp)
     val dateTime = instant.toLocalDateTime(TimeZone.currentSystemDefault())
     val twoDigitYear = dateTime.year % 100  // Extract last two digits of the year
     return "${dateTime.monthNumber}/$twoDigitYear"
 }
 
+@OptIn(FlowPreview::class)
 @Composable
 fun ChannelScreen(
     service: ConferenceService,
@@ -85,59 +81,176 @@ fun ChannelScreen(
     val channels by service.podcastChannels.collectAsState()
     val channelsCursor by service.currentChannelsCursor.collectAsState()
 
+    // Search state
+    var isSearchActive by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf<List<GetAllChannelDetails>>(emptyList()) }
+    var isLoadingSearchResults by remember { mutableStateOf(false) }
+    val activeTags = remember { mutableStateListOf<String>() }
+
+    // Search pagination
+    var searchCursor by remember { mutableStateOf<String?>(null) }
+    var hasMoreSearchResults by remember { mutableStateOf(false) }
+
+    // Load tags only once
+    val availableTags = remember { mutableStateListOf<String>() }
+    LaunchedEffect(Unit) {
+        try {
+            val tags = service.getAllChannelTags()
+            availableTags.clear()
+            availableTags.addAll(tags)
+        } catch (e: Exception) {
+            println("Error loading channel tags: ${e.message}")
+        }
+    }
+
+    // Determine which channels to display
+    val displayedChannels = if (isSearchActive && (query.isNotBlank() || activeTags.isNotEmpty())) {
+        searchResults
+    } else {
+        channels
+    }
+
     // Loading states
     var isLoadingMore by remember { mutableStateOf(false) }
-    var isLoadingPrevious by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
 
     // Initial load
     LaunchedEffect(Unit) {
         if (channels.isEmpty()) {
-            service.loadChannelsWithCursor(limit = 50)
+            service.loadChannelsWithCursor(limit = 30)
         }
     }
 
-    // Scroll detection for infinite scrolling
-    LaunchedEffect(listState, channels.size) {
-        // Wait for layout to be stable
-        snapshotFlow {
-            Triple(
-                listState.firstVisibleItemIndex,
-                listState.layoutInfo.visibleItemsInfo.size,
-                listState.layoutInfo.totalItemsCount
-            )
+    // Detect when we should load more data
+    val shouldLoadMore by remember {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val lastVisibleItem = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val totalItems = layoutInfo.totalItemsCount
+
+            lastVisibleItem >= totalItems - 3 &&
+                    ((!isSearchActive && !isLoadingMore && channelsCursor.second != null) ||
+                            (isSearchActive && !isLoadingSearchResults && hasMoreSearchResults))
         }
-            .debounce(100) // Debounce to prevent rapid firing
-            .collect { (firstVisible, visibleCount, totalCount) ->
-                // Check if we're near the beginning (load previous)
-                if (firstVisible < 2 && !isLoadingPrevious && channelsCursor.first != null) {
-                    isLoadingPrevious = true
+    }
+
+    // Load more data when needed
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore) {
+            if (isSearchActive) {
+                if (searchCursor != null && !isLoadingSearchResults && hasMoreSearchResults) {
+                    isLoadingSearchResults = true
                     try {
-                        service.loadChannelsWithCursor(
-                            cursor = channelsCursor.first,
-                            limit = 10,
-                            backward = true
+                        val result = service.searchContent(
+                            query = query,
+                            searchTab = SearchTab.PODCASTS,
+                            activeTags = activeTags.toList(),
+                            cursor = searchCursor,
+                            limit = 20
                         )
+
+                        // Convert and append search results
+                        @Suppress("UNCHECKED_CAST")
+                        val items = result.items as List<PodcastChannelSearchItem>
+                        val newChannels = items.map { item ->
+                            GetAllChannelDetails(
+                                id = item.id.toLong(),
+                                title = item.title,
+                                link = "",
+                                description = item.description,
+                                copyright = "",
+                                language = "",
+                                author = item.author,
+                                ownerEmail = "",
+                                ownerName = "",
+                                imageUrl = item.imageUrl ?: "",
+                                lastBuildDate = 0,
+                                episodeCount = item.episodeCount,
+                                earliestEpisodePubDate = null,
+                                latestEpisodePubDate = null,
+                                categories = item.categories.joinToString(",")
+                            )
+                        }
+
+                        searchResults = searchResults + newChannels
+                        searchCursor = result.nextCursor
+                        hasMoreSearchResults = result.hasMore
+                    } catch (e: Exception) {
+                        println("Load more search error: ${e.message}")
                     } finally {
-                        isLoadingPrevious = false
+                        isLoadingSearchResults = false
                     }
                 }
-
-                // Check if we're near the end (load more)
-                val lastVisible = firstVisible + visibleCount
-                if (lastVisible > totalCount - 3 && !isLoadingMore && channelsCursor.second != null) {
+            } else {
+                if (!isLoadingMore && channelsCursor.second != null) {
                     isLoadingMore = true
                     try {
                         service.loadChannelsWithCursor(
                             cursor = channelsCursor.second,
-                            limit = 10,
-                            backward = false
+                            limit = 10
                         )
                     } finally {
                         isLoadingMore = false
                     }
                 }
             }
+        }
+    }
+
+    // Perform search when query or tags change
+    LaunchedEffect(query, activeTags.toList()) {
+        if (isSearchActive) {
+            snapshotFlow { Pair(query, activeTags.toList()) }
+                .debounce(300)
+                .collect { (currentQuery, currentTags) ->
+                    isLoadingSearchResults = true
+                    searchResults = emptyList()
+                    searchCursor = null
+
+                    try {
+                        val result = service.searchContent(
+                            query = currentQuery,
+                            searchTab = SearchTab.PODCASTS,
+                            activeTags = currentTags,
+                            cursor = null,
+                            limit = 20
+                        )
+
+                        // Convert search results to channel format
+                        @Suppress("UNCHECKED_CAST")
+                        val items = result.items as List<PodcastChannelSearchItem>
+                        searchResults = items.map { item ->
+                            GetAllChannelDetails(
+                                id = item.id.toLong(),
+                                title = item.title,
+                                link = "",
+                                description = item.description,
+                                copyright = "",
+                                language = "",
+                                author = item.author,
+                                ownerEmail = "",
+                                ownerName = "",
+                                imageUrl = item.imageUrl ?: "",
+                                lastBuildDate = 0,
+                                episodeCount = item.episodeCount,
+                                earliestEpisodePubDate = null,
+                                latestEpisodePubDate = null,
+                                categories = item.categories.joinToString(",")
+                            )
+                        }
+
+                        searchCursor = result.nextCursor
+                        hasMoreSearchResults = result.hasMore
+
+                        // Scroll to top after search
+                        listState.scrollToItem(0)
+                    } catch (e: Exception) {
+                        println("Search error: ${e.message}")
+                    } finally {
+                        isLoadingSearchResults = false
+                    }
+                }
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -149,54 +262,97 @@ fun ChannelScreen(
             NavigationBar(
                 title = "Podcast Channels",
                 isLeftVisible = false,
-                isRightVisible = false
+                isRightVisible = true,
+                rightIcon = if (isSearchActive) Res.drawable.back else Res.drawable.search,
+                onRightClick = {
+                    if (isSearchActive) {
+                        isSearchActive = false
+                        query = ""
+                        activeTags.clear()
+                        searchResults = emptyList()
+                    } else {
+                        isSearchActive = true
+                    }
+                }
             )
 
-            if (channels.isEmpty()) {
-                // Initial loading state
+            // Search UI
+            AnimatedVisibility(visible = isSearchActive) {
+                Column {
+                    SearchField(
+                        text = query,
+                        onTextChange = { query = it },
+                    )
+
+                    if (availableTags.isNotEmpty()) {
+                        SearchSessionTags(
+                            availableTags,
+                            activeTags,
+                            onClick = { tag ->
+                                if (tag in activeTags) {
+                                    activeTags.remove(tag)
+                                } else {
+                                    activeTags.add(tag)
+                                }
+                            }
+                        )
+                    }
+
+                    HDivider()
+                }
+            }
+
+            if (displayedChannels.isEmpty() && (isLoadingMore || isLoadingSearchResults)) {
+                // Loading state
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
                     CircularProgressIndicator()
                 }
+            } else if (displayedChannels.isEmpty() && isSearchActive) {
+                // No search results
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "No channels found",
+                        style = MaterialTheme.typography.body1,
+                        color = MaterialTheme.colors.onBackground.copy(alpha = 0.7f)
+                    )
+                }
             } else {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.background(MaterialTheme.colors.whiteGrey)
                 ) {
-                    // Top loading indicator
-                    item(key = "top-loader") {
-                        if (isLoadingPrevious) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                            }
-                        }
-                    }
-
                     // Channel items
                     items(
-                        items = channels,
+                        items = displayedChannels,
                         key = { channel -> "channel-${channel.id}" }
                     ) { channel ->
                         ChannelCard(
                             channel = channel,
-                            onClick = { onNavigateToEpisodes(channel.id) }
+                            query = query,
+                            activeTags = activeTags,
+                            onClick = {
+                                // Make sure we load complete channel data before navigating
+                                // This ensures proper display of channel details
+                                service.ensureChannelLoaded(channel.id)
+                                onNavigateToEpisodes(channel.id)
+                            }
                         )
                     }
 
-                    // Bottom loading indicator
+                    // Loading indicator at bottom
                     item(key = "bottom-loader") {
-                        if (isLoadingMore) {
+                        if ((isSearchActive && isLoadingSearchResults) ||
+                            (!isSearchActive && isLoadingMore)) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(8.dp),
+                                    .padding(16.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 CircularProgressIndicator(modifier = Modifier.size(24.dp))
@@ -224,75 +380,6 @@ fun ChannelScreen(
                 onSpeedChange = onSpeedChange,
                 onBoostChange = onBoostChange
             )
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterialApi::class)
-@Composable
-private fun ChannelCard(
-    channel: GetAllChannelDetails,
-    onClick: () -> Unit = {}
-) {
-    val screenSizeIsTooWide = Screen.isTooWide()
-
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colors.whiteGrey)
-            .padding(0.dp),
-        onClick = onClick
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MaterialTheme.colors.whiteGrey)
-        ) {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                AsyncImage(
-                    modifier = Modifier
-                        .size(if (screenSizeIsTooWide) 170.dp else 85.dp)
-                        .padding(0.dp),
-                    imageUrl = channel.imageUrl,
-                    contentDescription = channel.title,
-                    contentScale = ContentScale.Crop,
-                )
-                Column(
-                    modifier = Modifier
-                        .padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Text(
-                        text = channel.title,
-                        style = MaterialTheme.typography.h4.copy(
-                            color = MaterialTheme.colors.greyWhite, fontWeight = FontWeight.Bold
-                        ),
-                        maxLines = 1
-                    )
-                    Text(
-                        text = "By ${channel.author}",
-                        style = MaterialTheme.typography.body2.copy(color = MaterialTheme.colors.greyGrey5),
-                        maxLines = 2
-                    )
-                    Row(horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "${channel.episodeCount} episodes",
-                            style = MaterialTheme.typography.caption.copy(color = grey50),
-                        )
-                        Text(
-                            text = "${channel.earliestEpisodePubDate?.let {
-                                formatDateForChannelScreen(
-                                    it
-                                )
-                            }} - ${channel.latestEpisodePubDate?.let { formatDateForChannelScreen(it) }}",
-                            style = MaterialTheme.typography.caption.copy(color = grey50),
-                        )
-                    }
-                }
-            }
-            HDivider()
         }
     }
 }

@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.BottomSheetScaffold
-import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
 import androidx.compose.material.MaterialTheme
@@ -35,7 +34,6 @@ import kotlinconfapp.shared.generated.resources.Res
 import kotlinconfapp.shared.generated.resources.bookmark
 import kotlinconfapp.shared.generated.resources.bookmark_active
 import kotlinx.coroutines.launch
-import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.kotlinApp.AppController
 import org.jetbrains.kotlinApp.Score
 import org.jetbrains.kotlinApp.Speaker
@@ -53,7 +51,7 @@ import org.jetbrains.kotlinApp.ui.theme.whiteGrey
 import org.jetbrains.kotlinApp.utils.Screen
 import org.jetbrains.kotlinApp.utils.isTooWide
 
-@OptIn(ExperimentalMaterialApi::class)
+
 @Composable
 fun SessionScreen(
     id: String,
@@ -119,7 +117,6 @@ fun SessionScreen(
     }
 }
 
-@OptIn(ExperimentalResourceApi::class)
 @Composable
 private fun SessionContent(
     time: String,
@@ -195,7 +192,7 @@ private fun SessionHead(
     }
 }
 
-@OptIn(ExperimentalResourceApi::class)
+
 @Composable
 private fun FavoriteButton(isFavorite: Boolean, favoriteClick: () -> Unit) {
     IconButton(onClick = favoriteClick) {
@@ -230,7 +227,7 @@ private fun SpeakerPhotos(speakers: List<Speaker>, speakerClick: (String) -> Uni
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class, ExperimentalResourceApi::class)
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SessionDetails(
     description: String, location: String, tags: List<String>, isFinished: Boolean

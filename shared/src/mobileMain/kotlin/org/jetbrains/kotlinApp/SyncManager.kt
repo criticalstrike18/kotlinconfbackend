@@ -6,18 +6,55 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.datetime.Instant
+import org.jetbrains.kotlinApp.storage.ApplicationStorage
+import org.jetbrains.kotlinApp.storage.getLong
+import org.jetbrains.kotlinApp.storage.putLong
+
+sealed class DataChangeEvent {
+    data object SessionsChanged : DataChangeEvent()
+    data object SpeakersChanged : DataChangeEvent()
+    data object FavoritesChanged : DataChangeEvent()
+    data object VotesChanged : DataChangeEvent()
+    data object PodcastsChanged : DataChangeEvent()
+}
 
 class SyncManager(
     private val dbStorage: DatabaseStorage,
     private val client: APIClient,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val storage: ApplicationStorage
 ) {
-    private val syncInterval = 30_000L // 30 seconds
-    private var syncJob: Job? = null
+    private val pushSyncInterval = 10_000L // 30 seconds for pushing changes
+    private val pullSyncInterval = 30_000L // 3 minutes for pulling new data
+
+    private var pushSyncJob: Job? = null
+    private var pullSyncJob: Job? = null
+
+    // Last sync timestamps
+    private var lastSessionPullTime: Long
+        get() = storage.getLong("last_session_pull_time", 0L)
+        set(value) = storage.putLong("last_session_pull_time", value)
+
+    private var lastSpeakerPullTime: Long
+        get() = storage.getLong("last_speaker_pull_time", 0L)
+        set(value) = storage.putLong("last_speaker_pull_time", value)
+
+    private var lastCategoryPullTime: Long
+        get() = storage.getLong("last_category_pull_time", 0L)
+        set(value) = storage.putLong("last_category_pull_time", value)
+
+    private var lastRoomPullTime: Long
+        get() = storage.getLong("last_room_pull_time", 0L)
+        set(value) = storage.putLong("last_room_pull_time", value)
+
+    private var lastPodcastPullTime: Long
+        get() = storage.getLong("last_podcast_pull_time", 0L)
+        set(value) = storage.putLong("last_podcast_pull_time", value)
 
     // Channels for handling sync requests
     private val voteChannel = Channel<String>(Channel.BUFFERED)
@@ -27,14 +64,17 @@ class SyncManager(
     private val speakerChannel = Channel<String>(Channel.BUFFERED)
     private val roomChannel = Channel<String>(Channel.BUFFERED)
     private val categoryChannel = Channel<String>(Channel.BUFFERED)
-    private val podcast = Channel<String>(Channel.BUFFERED)
+    private val podcastChannel = Channel<String>(Channel.BUFFERED)
+
+    // Flow to notify about data changes
+    private val _dataChangeEvents = MutableSharedFlow<DataChangeEvent>(extraBufferCapacity = 10)
+    val dataChangeEvents: SharedFlow<DataChangeEvent> = _dataChangeEvents
 
     fun startSync() {
-        syncJob?.cancel()
+        stopSync() // Ensure we don't have multiple jobs running
 
-        // Start periodic background sync
-        syncJob = scope.launch(Dispatchers.IO) {
-            launch { handlePodcastSync() }
+        // Start push sync (local to server)
+        pushSyncJob = scope.launch(Dispatchers.IO) {
             launch { handleVoteSync() }
             launch { handleFeedbackSync() }
             launch { handleFavoriteSync() }
@@ -42,42 +82,32 @@ class SyncManager(
             launch { handleSpeakerSync() }
             launch { handleRoomSync() }
             launch { handleCategorySync() }
+            launch { handlePodcastSync() }
 
             while (isActive) {
                 try {
                     syncPendingItems()
                 } catch (e: Exception) {
-                    println("Background sync failed: ${e.message}")
+                    println("Background push sync failed: ${e.message}")
                 }
-                delay(syncInterval)
+                delay(pushSyncInterval)
+            }
+        }
+
+        // Start pull sync (server to local)
+        pullSyncJob = scope.launch(Dispatchers.IO) {
+            while (isActive) {
+                try {
+                    pullNewDataFromServer()
+                } catch (e: Exception) {
+                    println("Background pull sync failed: ${e.message}")
+                }
+                delay(pullSyncInterval)
             }
         }
     }
 
-    data class ServerSyncResponse(
-        val success: Boolean,
-        val sessionId: String? = null,
-        val roomId: Long? = null,
-        val categoryId: Long? = null,
-        val speakerId: String? = null,
-        val message: String? = null
-    )
-
-    private fun SessionInfo.toConferenceSessionRequest(): ConferenceSessionRequest {
-        return ConferenceSessionRequest(
-            title = this.title,
-            description = this.description,
-            startsAt = this.startsAt,
-            endsAt = this.endsAt,
-            roomId = this.roomId,
-            isServiceSession = this.isServiceSession,
-            isPlenumSession = this.isPlenumSession,
-            status = this.status,
-            speakerIds = this.speakerIds,
-            categoryIds = this.categoryIds
-        )
-    }
-
+    // Handle pushing local changes to server
     private suspend fun handleSessionSync() {
         for (sessionId in sessionChannel) {
             try {
@@ -116,6 +146,9 @@ class SyncManager(
                             GMTDate().timestamp
                         )
                     }
+
+                    // Notify that sessions have changed
+                    _dataChangeEvents.emit(DataChangeEvent.SessionsChanged)
                 }
             } catch (e: Exception) {
                 println("Session sync failed for session $sessionId: ${e.message}")
@@ -123,8 +156,7 @@ class SyncManager(
         }
     }
 
-
-        private suspend fun handleSpeakerSync() {
+    private suspend fun handleSpeakerSync() {
         for (speakerId in speakerChannel) {
             try {
                 val pendingSessionSpeakers = dbStorage.getPendingSessionSpeakers()
@@ -139,6 +171,7 @@ class SyncManager(
                                 speakerId = sessionSpeaker.speakerId,
                                 currentTimestamp = GMTDate().timestamp
                             )
+                            _dataChangeEvents.emit(DataChangeEvent.SpeakersChanged)
                         }
                     } catch (e: Exception) {
                         println("Failed to sync session-speaker relationship: ${sessionSpeaker.sessionId}-${sessionSpeaker.speakerId}: ${e.message}")
@@ -165,7 +198,7 @@ class SyncManager(
                         // Update local room ID to match server ID
                         dbStorage.updateRoomId(oldId, serverRoomId.toLong())
                         dbStorage.markRoomSynced(serverRoomId.toLong(), GMTDate().timestamp)
-
+                        _dataChangeEvents.emit(DataChangeEvent.SessionsChanged)
                     } else {
                         // Log sync failure for retry
                         println("Failed to sync room ${room.id} - will retry in next sync cycle: ${serverResponse.message}")
@@ -183,7 +216,8 @@ class SyncManager(
                 val pendingCategories = dbStorage.getPendingSessionCategories()
                 pendingCategories.forEach { category ->
                     // Implement server sync logic here
-                    dbStorage.markSessionCategorySynced(currentTimestamp = GMTDate().timestamp, categoryId = category.categoryId, sessionId = category.sessionId, )
+                    dbStorage.markSessionCategorySynced(currentTimestamp = GMTDate().timestamp, categoryId = category.categoryId, sessionId = category.sessionId)
+                    _dataChangeEvents.emit(DataChangeEvent.SessionsChanged)
                 }
             } catch (e: Exception) {
                 println("Category sync failed: ${e.message}")
@@ -199,10 +233,10 @@ class SyncManager(
 
                 if (client.vote(vote.sessionId, vote.score)) {
                     dbStorage.markVoteSynced(vote.sessionId, GMTDate().timestamp)
+                    _dataChangeEvents.emit(DataChangeEvent.VotesChanged)
                 }
             } catch (e: Exception) {
                 println("Vote sync failed for session $sessionId: ${e.message}")
-                // Will be picked up by periodic sync later
             }
         }
     }
@@ -215,6 +249,7 @@ class SyncManager(
 
                 if (client.sendFeedback(feedback.sessionId, feedback.value)) {
                     dbStorage.markFeedbackSynced(feedback.sessionId, GMTDate().timestamp)
+                    // No need to emit event as feedback doesn't affect UI state
                 }
             } catch (e: Exception) {
                 println("Feedback sync failed for session $sessionId: ${e.message}")
@@ -230,46 +265,128 @@ class SyncManager(
 
                 if (syncFavoriteWithServer(favorite)) {
                     dbStorage.markFavoriteSynced(favorite.sessionId, GMTDate().timestamp)
+                    _dataChangeEvents.emit(DataChangeEvent.FavoritesChanged)
                 }
             } catch (e: Exception) {
                 println("Favorite sync failed for session $sessionId: ${e.message}")
             }
         }
     }
-    private fun syncFavoriteWithServer(favoriteInfo: FavoriteInfo): Boolean {
-        // Implement server sync logic for favorites
-        return true // Placeholder
-    }
 
     private suspend fun handlePodcastSync() {
-//        try {
-//            // Fetch data using ProtoBuf from your API
-//            val podcastsData: List<ChannelFullData> = client.getPodcastsData()
-//            println("Fetched ${podcastsData.count()} podcasts from server")
-//
-//            // Use batch insert
-//            dbStorage.syncPodcastData(podcastsData)
-//
-//            println("Podcast sync completed successfully")
-//        } catch (e: Exception) {
-//            println("Podcast sync failed: ${e.message}")
-//            e.printStackTrace()
-//        }
-    }
-
-    private fun parseDate(dateStr: String?): String {
-        return try {
-            // For example, using Kotlinx datetime:
-            if (dateStr != null) {
-                Instant.parse(dateStr).toEpochMilliseconds().toString()
-            } else {
-                ""
-            }
-        } catch (e: Exception) {
-            "0L"
+        for (podcastId in podcastChannel) {
+            // Handle podcast sync if needed
+            // Currently just a placeholder
         }
     }
 
+    // New method to pull data from server
+    private suspend fun pullNewDataFromServer() {
+        withContext(Dispatchers.IO) {
+            var dataChanged = false
+
+            // Sync sessions with changes since last sync
+            try {
+                val lastSyncTime = lastSessionPullTime
+                val sessions = client.getSessionDataSince(lastSyncTime)
+                if (sessions.isNotEmpty()) {
+                    sessions.forEach { session ->
+                        dbStorage.insertSession(session)
+                    }
+                    lastSessionPullTime = System.currentTimeMillis()
+                    dataChanged = true
+                }
+            } catch (e: Exception) {
+                println("Failed to pull new sessions: ${e.message}")
+            }
+
+            // Sync speakers with changes since last sync
+            try {
+                val lastSyncTime = lastSpeakerPullTime
+                val speakers = client.getSpeakerDataSince(lastSyncTime)
+                if (speakers.isNotEmpty()) {
+                    speakers.forEach { speaker ->
+                        dbStorage.insertSpeaker(speaker)
+                    }
+                    lastSpeakerPullTime = System.currentTimeMillis()
+                    dataChanged = true
+                }
+            } catch (e: Exception) {
+                println("Failed to pull new speakers: ${e.message}")
+            }
+
+            // Sync rooms
+            try {
+                val lastSyncTime = lastRoomPullTime
+                val rooms = client.getRoomDataSince(lastSyncTime)
+                if (rooms.isNotEmpty()) {
+                    rooms.forEach { room ->
+                        dbStorage.insertRoom(room)
+                    }
+                    lastRoomPullTime = System.currentTimeMillis()
+                    dataChanged = true
+                }
+            } catch (e: Exception) {
+                println("Failed to pull new rooms: ${e.message}")
+            }
+
+            // Sync categories
+            try {
+                val lastSyncTime = lastCategoryPullTime
+                val categories = client.getCategoryDataSince(lastSyncTime)
+                if (categories.isNotEmpty()) {
+                    categories.forEach { category ->
+                        dbStorage.insertCategory(category)
+                    }
+                    lastCategoryPullTime = System.currentTimeMillis()
+                    dataChanged = true
+                }
+            } catch (e: Exception) {
+                println("Failed to pull new categories: ${e.message}")
+            }
+
+            // Sync podcast content if needed
+            try {
+                val lastSyncTime = lastPodcastPullTime
+                val podcasts = client.getPodcastDataSince(lastSyncTime)
+                if (podcasts.isNotEmpty()) {
+                    dbStorage.syncPodcastDataBatch(podcasts)
+                    lastPodcastPullTime = System.currentTimeMillis()
+                    _dataChangeEvents.emit(DataChangeEvent.PodcastsChanged)
+                }
+            } catch (e: Exception) {
+                println("Failed to pull new podcast data: ${e.message}")
+            }
+
+            // Notify data changes if needed
+            if (dataChanged) {
+                _dataChangeEvents.emit(DataChangeEvent.SessionsChanged)
+            }
+        }
+    }
+
+    // Add any helper methods needed for the implementation
+    private fun syncFavoriteWithServer(favoriteInfo: FavoriteInfo): Boolean {
+        // Implement server sync logic for favorites
+        return true // Placeholder implementation
+    }
+
+    private fun SessionInfo.toConferenceSessionRequest(): ConferenceSessionRequest {
+        return ConferenceSessionRequest(
+            title = this.title,
+            description = this.description,
+            startsAt = this.startsAt,
+            endsAt = this.endsAt,
+            roomId = this.roomId,
+            isServiceSession = this.isServiceSession,
+            isPlenumSession = this.isPlenumSession,
+            status = this.status,
+            speakerIds = this.speakerIds,
+            categoryIds = this.categoryIds
+        )
+    }
+
+    // Synchronize pending items to the server
     private suspend fun syncPendingItems() {
         withContext(Dispatchers.IO) {
             // Sync all pending votes
@@ -287,6 +404,7 @@ class SyncManager(
                 favoriteChannel.send(favorite.sessionId)
             }
 
+            // Sync all pending sessions
             dbStorage.getPendingSessions().forEach { session ->
                 sessionChannel.send(session.id)
             }
@@ -317,14 +435,21 @@ class SyncManager(
             SyncType.SPEAKER -> speakerChannel.send(id)
             SyncType.ROOM -> roomChannel.send(id)
             SyncType.CATEGORY -> categoryChannel.send(id)
-            SyncType.PODCAST -> podcast.send(id)
+            SyncType.PODCAST -> podcastChannel.send(id)
         }
     }
 
+    // Trigger immediate pull sync (useful after network reconnection)
+    suspend fun triggerImmediatePull() {
+        pullNewDataFromServer()
+    }
 
     fun stopSync() {
-        syncJob?.cancel()
-        syncJob = null
+        pushSyncJob?.cancel()
+        pushSyncJob = null
+
+        pullSyncJob?.cancel()
+        pullSyncJob = null
     }
 }
 

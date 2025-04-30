@@ -448,6 +448,20 @@ LEFT JOIN ChannelCategoryMap ccm ON c.id = ccm.channelId
 LEFT JOIN PodcastChannelCategories pc ON ccm.categoryId = pc.id
 GROUP BY c.id;
 
+getAllChannelDetailsById:
+SELECT
+    c.*,
+    COUNT(DISTINCT e.id) AS episodeCount,
+    MIN(e.pubDate) AS earliestEpisodePubDate,
+    MAX(e.pubDate) AS latestEpisodePubDate,
+    GROUP_CONCAT(DISTINCT pc.name) AS categories
+FROM PodcastChannels c
+LEFT JOIN PodcastEpisodes e ON e.channelId = c.id
+LEFT JOIN ChannelCategoryMap ccm ON c.id = ccm.channelId
+LEFT JOIN PodcastChannelCategories pc ON ccm.categoryId = pc.id
+WHERE c.id = :channelId
+GROUP BY c.id;
+
 -- Similarly for episodes
 insertEpisode:
 INSERT INTO PodcastEpisodes(
@@ -488,6 +502,36 @@ selectEpisodesByChannelId:
 SELECT *
 FROM PodcastEpisodes
 WHERE channelId = ?;
+
+getChannelEpisodeTags:
+SELECT DISTINCT pc.name
+FROM PodcastEpisodeCategories pc
+JOIN EpisodeCategoryMap ecm ON pc.id = ecm.categoryId
+JOIN PodcastEpisodes e ON ecm.episodeId = e.id
+WHERE e.channelId = ?;
+
+getEpisodeCategoriesById:
+SELECT em.categories
+FROM (
+    SELECT e.id, GROUP_CONCAT(c.name) AS categories
+    FROM PodcastEpisodes e
+    LEFT JOIN EpisodeCategoryMap cm ON e.id = cm.episodeId
+    LEFT JOIN PodcastEpisodeCategories c ON cm.categoryId = c.id
+    WHERE e.id = ?
+    GROUP BY e.id
+) em;
+
+getEpisodeTagsForEpisodes:
+SELECT DISTINCT pc.name
+FROM PodcastEpisodeCategories pc
+JOIN EpisodeCategoryMap ecm ON pc.id = ecm.categoryId
+WHERE ecm.episodeId IN ?;
+
+getEpisodeTagsById:
+SELECT DISTINCT pc.name
+FROM PodcastEpisodeCategories pc
+JOIN EpisodeCategoryMap ecm ON pc.id = ecm.categoryId
+WHERE ecm.episodeId = ?;
 
 -- Enhanced Episode Queries
 getEpisodeWithCategories:
@@ -891,15 +935,9 @@ SELECT DISTINCT
      WHERE ecm.episodeId = e.id) AS categories
 FROM PodcastEpisodes e
 JOIN PodcastChannels c ON e.channelId = c.id
-WHERE e.id IN (
-    -- Filter by episode categories first (much smaller table)
-    SELECT DISTINCT ecm.episodeId
-    FROM EpisodeCategoryMap ecm
-    JOIN PodcastEpisodeCategories pec ON ecm.categoryId = pec.id
-    WHERE pec.name LIKE '%' || :query || '%'
-)
+WHERE (:query = '' OR e.title LIKE '%' || :query || '%' OR e.description LIKE '%' || :query || '%')
 AND (:hasTagFilter = 0 OR e.id IN (
-    -- Additional tag filtering if needed
+    -- Simplified tag filtering that works whether query is empty or not
     SELECT DISTINCT em.episodeId
     FROM EpisodeCategoryMap em
     JOIN PodcastEpisodeCategories pec ON em.categoryId = pec.id
@@ -910,3 +948,55 @@ ORDER BY CASE WHEN :backward = 1 THEN e.pubDate END ASC,
          CASE WHEN :backward = 0 THEN e.pubDate END DESC
 LIMIT :limit;
 
+-- Efficiently get all unique channel categories (limited to 200 as you liked)
+getAllUniqueChannelCategories:
+SELECT DISTINCT name FROM PodcastChannelCategories
+ORDER BY name
+LIMIT 50;
+
+-- Efficiently get all unique episode categories (limited to 200)
+getAllUniqueEpisodeCategories:
+SELECT DISTINCT name FROM PodcastEpisodeCategories
+ORDER BY name
+LIMIT 200;
+
+-- Get episodes across all channels with a proper SQLDelight syntax
+-- Note: We don't use column alias with "as" - will use mapper instead
+getEpisodesAcrossChannels:
+SELECT
+    e.id, e.channelId, e.guid, e.title, e.description,
+    e.link, e.pubDate, e.duration, e.explicit,
+    e.imageUrl, e.mediaUrl, e.mediaType, e.mediaLength,
+    c.title AS channelTitle
+FROM PodcastEpisodes e
+JOIN PodcastChannels c ON e.channelId = c.id
+WHERE (:channelId = -1 OR e.channelId = :channelId)
+ORDER BY e.pubDate DESC
+LIMIT :limit;
+
+-- Efficient batch lookup of channel categories
+getChannelCategories:
+SELECT cm.channelId, GROUP_CONCAT(pc.name) AS categories
+FROM ChannelCategoryMap cm
+JOIN PodcastChannelCategories pc ON cm.categoryId = pc.id
+WHERE cm.channelId IN :channelIds
+GROUP BY cm.channelId;
+
+-- Efficient batch lookup of episode categories
+getEpisodeCategories:
+SELECT em.episodeId, GROUP_CONCAT(pc.name) AS categories
+FROM EpisodeCategoryMap em
+JOIN PodcastEpisodeCategories pc ON em.categoryId = pc.id
+WHERE em.episodeId IN :episodeIds
+GROUP BY em.episodeId;
+
+-- Modify the getEpisodesForChannelCursor to handle the special -1 case
+getEpisodesForChannelCursor_Updated:
+SELECT e.id, e.channelId, e.guid, e.title, e.description,
+       e.link, e.pubDate, e.duration, e.explicit,
+       e.imageUrl, e.mediaUrl, e.mediaType, e.mediaLength
+FROM PodcastEpisodes e
+WHERE (:channelId = -1 OR e.channelId = :channelId)
+AND (:cursor IS NULL OR e.pubDate < :cursor)
+ORDER BY e.pubDate DESC
+LIMIT :limit;

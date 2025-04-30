@@ -3,6 +3,12 @@
 package org.jetbrains.kotlinApp.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,22 +28,29 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -51,14 +64,20 @@ import kotlinconfapp.shared.generated.resources.back
 import kotlinconfapp.shared.generated.resources.episode
 import kotlinconfapp.shared.generated.resources.podcast
 import kotlinconfapp.shared.generated.resources.session
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.kotlinApp.AppController
 import org.jetbrains.kotlinApp.EpisodeSearchItem
 import org.jetbrains.kotlinApp.PodcastChannelSearchItem
 import org.jetbrains.kotlinApp.SessionSearchItem
+import org.jetbrains.kotlinApp.podcast.PodcastCacheManager
 import org.jetbrains.kotlinApp.ui.components.AsyncImage
 import org.jetbrains.kotlinApp.ui.components.SearchField
 import org.jetbrains.kotlinApp.ui.components.SearchSessionTags
@@ -110,29 +129,35 @@ enum class SearchTab(override val title: StringResource) : Tab {
     EPISODES(Res.string.episode);
 }
 
+@OptIn(FlowPreview::class)
 @Composable
 fun SearchScreen(
     controller: AppController,
     back: () -> Unit
 ) {
+    // OPTIMIZATION: Store queries per tab to avoid rerunning searches during tab switches
+    var queries by remember { mutableStateOf(mapOf<SearchTab, String>()) }
     var query by remember { mutableStateOf("") }
     var selectedTab by remember { mutableStateOf(SearchTab.TALKS) }
     val coroutineScope = rememberCoroutineScope()
+    val searchCacheState by controller.service.searchCacheState.collectAsState()
 
     // Separate loading states for each tab
     var isLoadingTalks by remember { mutableStateOf(false) }
     var isLoadingPodcasts by remember { mutableStateOf(false) }
     var isLoadingEpisodes by remember { mutableStateOf(false) }
 
-    // Pagination state
-    var hasMoreResults by remember { mutableStateOf(true) }
-    var currentCursor by remember { mutableStateOf<String?>(null) }
-    var prevCursor by remember { mutableStateOf<String?>(null) }
+    // OPTIMIZATION: Track pagination state separately for each tab
+    val cursors = remember { mutableStateMapOf<SearchTab, String?>() }
+    val hasMoreMap = remember { mutableStateMapOf<SearchTab, Boolean>() }
 
-    // Search job for cancellation
-    var searchJob by remember { mutableStateOf<Job?>(null) }
+    // OPTIMIZATION: Track if initial load has been done for each tab
+    val initialLoadDone = remember { mutableStateMapOf<SearchTab, Boolean>() }
 
-    // Results state
+    // Search job for cancellation (per tab)
+    val searchJobs = remember { mutableStateMapOf<SearchTab, Job?>() }
+
+    // OPTIMIZATION: Preserve results state across tab switches
     var talkResults by remember { mutableStateOf<List<SessionSearchItem>>(emptyList()) }
     var podcastResults by remember { mutableStateOf<List<PodcastChannelSearchItem>>(emptyList()) }
     var episodeResults by remember { mutableStateOf<List<EpisodeSearchItem>>(emptyList()) }
@@ -145,8 +170,17 @@ fun SearchScreen(
     val activePodcastTags = remember { mutableStateListOf<String>() }
     val activeEpisodeTags = remember { mutableStateListOf<String>() }
 
-    // Scroll state
-    val listState = rememberLazyListState()
+    // OPTIMIZATION: Maintain separate scroll states for each tab to preserve position
+    val talksListState = rememberLazyListState()
+    val podcastsListState = rememberLazyListState()
+    val episodesListState = rememberLazyListState()
+
+// Get the current list state based on selected tab
+    val listState = when (selectedTab) {
+        SearchTab.TALKS -> talksListState
+        SearchTab.PODCASTS -> podcastsListState
+        SearchTab.EPISODES -> episodesListState
+    }
 
     // Track if we need to load more on scroll
     val shouldLoadMore by remember {
@@ -154,185 +188,287 @@ fun SearchScreen(
             val layoutInfo = listState.layoutInfo
             val lastVisibleItemIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
             val totalItemsCount = layoutInfo.totalItemsCount
+            val hasMore = hasMoreMap[selectedTab] ?: false
+            val isLoading = when(selectedTab) {
+                SearchTab.TALKS -> isLoadingTalks
+                SearchTab.PODCASTS -> isLoadingPodcasts
+                SearchTab.EPISODES -> isLoadingEpisodes
+            }
 
-            hasMoreResults && !isLoadingEpisodes && !isLoadingPodcasts && !isLoadingTalks &&
-                    currentCursor != null && lastVisibleItemIndex >= totalItemsCount - 5
+            hasMore && !isLoading &&
+                    cursors[selectedTab] != null &&
+                    lastVisibleItemIndex >= totalItemsCount - 5
         }
     }
 
-    // Load more results function
-    val loadMoreResults = { tab: SearchTab, cursor: String? ->
-        searchJob?.cancel()
-        searchJob = coroutineScope.launch {
-            when (tab) {
-                SearchTab.TALKS -> isLoadingTalks = true
-                SearchTab.PODCASTS -> isLoadingPodcasts = true
-                SearchTab.EPISODES -> isLoadingEpisodes = true
+    // OPTIMIZATION: Initialize tag loading in parallel
+    LaunchedEffect(Unit) {
+        // Initial load of tags from cache (non-blocking)
+        val initialPodcastTags = controller.service.getCachedChannelTags()
+        val initialEpisodeTags = controller.service.getCachedEpisodeTags()
+
+        if (initialPodcastTags.isNotEmpty()) {
+            podcastTags.addAll(initialPodcastTags)
+        }
+
+        if (initialEpisodeTags.isNotEmpty()) {
+            episodeTags.addAll(initialEpisodeTags)
+        }
+
+        // Load tags in the background if needed
+        launch {
+            if (podcastTags.isEmpty()) {
+                val tags = controller.service.getChannelTagsFromCache()
+                withContext(Dispatchers.Main) {
+                    podcastTags.clear()
+                    podcastTags.addAll(tags)
+                }
+            }
+        }
+
+        launch {
+            if (episodeTags.isEmpty()) {
+                val tags = controller.service.getEpisodeTagsFromCache()
+                withContext(Dispatchers.Main) {
+                    episodeTags.clear()
+                    episodeTags.addAll(tags)
+                }
+            }
+        }
+
+        // Original talk tags loading
+        launch {
+            if (talkTags.isEmpty()) {
+                val tags = controller.service.getSessionTags()
+                withContext(Dispatchers.Main) {
+                    talkTags.clear()
+                    talkTags.addAll(tags)
+                }
+            }
+        }
+    }
+
+    // OPTIMIZATION: Detect and load more content when scrolling near the end
+    LaunchedEffect(listState) {
+        snapshotFlow { shouldLoadMore }
+            .debounce(200) // Debounce to prevent multiple rapid loads
+            .collect { shouldLoad ->
+                if (shouldLoad) {
+                    loadMoreResults(
+                        selectedTab = selectedTab,
+                        cursor = cursors[selectedTab],
+                        query = query,
+                        activeTags = getActiveTags(selectedTab, activeTalkTags, activePodcastTags, activeEpisodeTags),
+                        controller = controller,
+                        onLoadStarted = {
+                            when (selectedTab) {
+                                SearchTab.TALKS -> isLoadingTalks = true
+                                SearchTab.PODCASTS -> isLoadingPodcasts = true
+                                SearchTab.EPISODES -> isLoadingEpisodes = true
+                            }
+                        },
+                        onLoadCompleted = { result, nextCursor, hasMore ->
+                            when (selectedTab) {
+                                SearchTab.TALKS -> isLoadingTalks = false
+                                SearchTab.PODCASTS -> isLoadingPodcasts = false
+                                SearchTab.EPISODES -> isLoadingEpisodes = false
+                            }
+                            cursors[selectedTab] = nextCursor
+                            hasMoreMap[selectedTab] = hasMore
+
+                            // Append new results
+                            when (selectedTab) {
+                                SearchTab.TALKS -> {
+                                    @Suppress("UNCHECKED_CAST")
+                                    talkResults = talkResults + (result as List<SessionSearchItem>)
+                                }
+                                SearchTab.PODCASTS -> {
+                                    @Suppress("UNCHECKED_CAST")
+                                    podcastResults = podcastResults + (result as List<PodcastChannelSearchItem>)
+                                }
+                                SearchTab.EPISODES -> {
+                                    @Suppress("UNCHECKED_CAST")
+                                    episodeResults = episodeResults + (result as List<EpisodeSearchItem>)
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+    }
+
+    // OPTIMIZATION: Handle tab change with proper state restoration
+    LaunchedEffect(selectedTab) {
+        // Restore query if we have one saved for this tab
+        query = queries[selectedTab] ?: ""
+
+        when (selectedTab) {
+            SearchTab.PODCASTS -> {
+                // Show loading state
+                isLoadingPodcasts = true
+
+                if (initialLoadDone[selectedTab] != true) {
+                    // Try to use cached results first (non-blocking)
+                    if (searchCacheState == PodcastCacheManager.CacheState.LOADED) {
+                        val cachedResults = controller.service.getCachedChannelResults()
+                        if (cachedResults.isNotEmpty()) {
+                            podcastResults = cachedResults
+                            cursors[selectedTab] = cachedResults.lastOrNull()?.id
+                            hasMoreMap[selectedTab] = true
+                            initialLoadDone[selectedTab] = true
+                            isLoadingPodcasts = false
+                        }
+                    }
+
+                    // If still not loaded or cache wasn't available, perform search
+                    if (initialLoadDone[selectedTab] != true) {
+                        performSearch(
+                            tab = selectedTab,
+                            query = query,
+                            activeTags = activePodcastTags,
+                            controller = controller,
+                            searchJobs = searchJobs,
+                            onLoadStarted = { /* already set loading state */ },
+                            onLoadCompleted = { result, nextCursor, hasMore ->
+                                isLoadingPodcasts = false
+                                cursors[selectedTab] = nextCursor
+                                hasMoreMap[selectedTab] = hasMore
+                                initialLoadDone[selectedTab] = true
+                                @Suppress("UNCHECKED_CAST")
+                                podcastResults = result as List<PodcastChannelSearchItem>
+                            }
+                        )
+                    }
+                } else {
+                    // Already loaded, just update state
+                    isLoadingPodcasts = false
+                }
             }
 
-            try {
-                val activeTags = when (tab) {
-                    SearchTab.TALKS -> activeTalkTags.toList()
-                    SearchTab.PODCASTS -> activePodcastTags.toList()
-                    SearchTab.EPISODES -> activeEpisodeTags.toList()
+            SearchTab.EPISODES -> {
+                // Show loading state
+                isLoadingEpisodes = true
+
+                if (initialLoadDone[selectedTab] != true) {
+                    // Try to use cached results first (non-blocking)
+                    if (searchCacheState == PodcastCacheManager.CacheState.LOADED) {
+                        val cachedResults = controller.service.getCachedEpisodeResults()
+                        if (cachedResults.isNotEmpty()) {
+                            episodeResults = cachedResults
+                            cursors[selectedTab] = cachedResults.lastOrNull()?.pubDate?.toString()
+                            hasMoreMap[selectedTab] = true
+                            initialLoadDone[selectedTab] = true
+                            isLoadingEpisodes = false
+                        }
+                    }
+
+                    // If still not loaded or cache wasn't available, perform search
+                    if (initialLoadDone[selectedTab] != true) {
+                        performSearch(
+                            tab = selectedTab,
+                            query = query,
+                            activeTags = activeEpisodeTags,
+                            controller = controller,
+                            searchJobs = searchJobs,
+                            onLoadStarted = { /* already set loading state */ },
+                            onLoadCompleted = { result, nextCursor, hasMore ->
+                                isLoadingEpisodes = false
+                                cursors[selectedTab] = nextCursor
+                                hasMoreMap[selectedTab] = hasMore
+                                initialLoadDone[selectedTab] = true
+                                @Suppress("UNCHECKED_CAST")
+                                episodeResults = result as List<EpisodeSearchItem>
+                            }
+                        )
+                    }
+                } else {
+                    // Already loaded, just update state
+                    isLoadingEpisodes = false
                 }
+            }
 
-                val result = controller.service.searchContent(
-                    query = query,
-                    searchTab = tab,
-                    activeTags = activeTags,
-                    cursor = cursor,
-                    limit = 20,
-                    backward = false
-                )
+            SearchTab.TALKS -> {
+                // Keep original behavior for talks
+                if (initialLoadDone[selectedTab] != true) {
+                    performSearch(
+                        tab = selectedTab,
+                        query = query,
+                        activeTags = activeTalkTags,
+                        controller = controller,
+                        searchJobs = searchJobs,
+                        onLoadStarted = { isLoadingTalks = true },
+                        onLoadCompleted = { result, nextCursor, hasMore ->
+                            isLoadingTalks = false
+                            cursors[selectedTab] = nextCursor
+                            hasMoreMap[selectedTab] = hasMore
+                            initialLoadDone[selectedTab] = true
+                            @Suppress("UNCHECKED_CAST")
+                            talkResults = result as List<SessionSearchItem>
+                        }
+                    )
+                }
+            }
+        }
+    }
 
-                hasMoreResults = result.hasMore
-                currentCursor = result.nextCursor
+    // OPTIMIZATION: Debounced query and tag change handling
+    val performDebouncedSearch = debounce<Unit>(300, coroutineScope) {
+        // Save query for this tab
+        queries = queries + (selectedTab to query)
 
-                when (tab) {
+        performSearch(
+            tab = selectedTab,
+            query = query,
+            activeTags = getActiveTags(selectedTab, activeTalkTags, activePodcastTags, activeEpisodeTags),
+            controller = controller,
+            searchJobs = searchJobs,
+            onLoadStarted = {
+                when (selectedTab) {
+                    SearchTab.TALKS -> isLoadingTalks = true
+                    SearchTab.PODCASTS -> isLoadingPodcasts = true
+                    SearchTab.EPISODES -> isLoadingEpisodes = true
+                }
+            },
+            onLoadCompleted = { result, nextCursor, hasMore ->
+                when (selectedTab) {
+                    SearchTab.TALKS -> isLoadingTalks = false
+                    SearchTab.PODCASTS -> isLoadingPodcasts = false
+                    SearchTab.EPISODES -> isLoadingEpisodes = false
+                }
+                cursors[selectedTab] = nextCursor
+                hasMoreMap[selectedTab] = hasMore
+
+                // Replace results on new search
+                when (selectedTab) {
                     SearchTab.TALKS -> {
-                        val newItems = result.items as List<SessionSearchItem>
-                        talkResults = talkResults + newItems
+                        @Suppress("UNCHECKED_CAST")
+                        talkResults = result as List<SessionSearchItem>
                     }
                     SearchTab.PODCASTS -> {
-                        val newItems = result.items as List<PodcastChannelSearchItem>
-                        podcastResults = podcastResults + newItems
+                        @Suppress("UNCHECKED_CAST")
+                        podcastResults = result as List<PodcastChannelSearchItem>
                     }
                     SearchTab.EPISODES -> {
-                        val newItems = result.items as List<EpisodeSearchItem>
-                        episodeResults = episodeResults + newItems
-                    }
-                }
-            } catch (e: Exception) {
-                println("Error loading more results: ${e.message}")
-            } finally {
-                when (tab) {
-                    SearchTab.TALKS -> isLoadingTalks = false
-                    SearchTab.PODCASTS -> isLoadingPodcasts = false
-                    SearchTab.EPISODES -> isLoadingEpisodes = false
-                }
-            }
-        }
-    }
-
-    // Load more when scrolling near the end
-    LaunchedEffect(shouldLoadMore) {
-        if (shouldLoadMore) {
-            loadMoreResults(selectedTab, currentCursor)
-        }
-    }
-
-    // Perform search with debounce
-    val performSearch = { tab: SearchTab ->
-        searchJob?.cancel()
-        searchJob = coroutineScope.launch {
-            when (tab) {
-                SearchTab.TALKS -> isLoadingTalks = true
-                SearchTab.PODCASTS -> isLoadingPodcasts = true
-                SearchTab.EPISODES -> isLoadingEpisodes = true
-            }
-
-            // Reset cursors and clear results when starting a new search
-            currentCursor = null
-            prevCursor = null
-
-            when (tab) {
-                SearchTab.TALKS -> talkResults = emptyList()
-                SearchTab.PODCASTS -> podcastResults = emptyList()
-                SearchTab.EPISODES -> episodeResults = emptyList()
-            }
-
-            delay(300) // Debounce
-
-            try {
-                val activeTags = when (tab) {
-                    SearchTab.TALKS -> activeTalkTags.toList()
-                    SearchTab.PODCASTS -> activePodcastTags.toList()
-                    SearchTab.EPISODES -> activeEpisodeTags.toList()
-                }
-
-                println("Starting search for $tab with query='$query', tags=$activeTags")
-
-                val result = controller.service.searchContent(
-                    query = query,
-                    searchTab = tab,
-                    activeTags = activeTags,
-                    cursor = null,
-                    limit = 20
-                )
-
-                hasMoreResults = result.hasMore
-                currentCursor = result.nextCursor
-                prevCursor = result.prevCursor
-
-                when (tab) {
-                    SearchTab.TALKS -> talkResults = result.items as List<SessionSearchItem>
-                    SearchTab.PODCASTS -> podcastResults = result.items as List<PodcastChannelSearchItem>
-                    SearchTab.EPISODES -> episodeResults = result.items as List<EpisodeSearchItem>
-                }
-            } catch (e: Exception) {
-                println("Search error: ${e.message}")
-                e.printStackTrace()
-            } finally {
-                when (tab) {
-                    SearchTab.TALKS -> isLoadingTalks = false
-                    SearchTab.PODCASTS -> isLoadingPodcasts = false
-                    SearchTab.EPISODES -> isLoadingEpisodes = false
-                }
-            }
-        }
-    }
-
-    // Load tags and initial data on tab change
-    LaunchedEffect(selectedTab) {
-        // Load tags for the selected tab
-        when (selectedTab) {
-            SearchTab.TALKS -> {
-                if (talkTags.isEmpty()) {
-                    try {
-                        val tags = controller.service.getSessionTags()
-                        talkTags.clear()
-                        talkTags.addAll(tags)
-                    } catch (e: Exception) {
-                        println("Error loading talk tags: ${e.message}")
+                        @Suppress("UNCHECKED_CAST")
+                        episodeResults = result as List<EpisodeSearchItem>
                     }
                 }
             }
-            SearchTab.PODCASTS -> {
-                if (podcastTags.isEmpty()) {
-                    try {
-                        val tags = controller.service.getChannelTags()
-                        podcastTags.clear()
-                        podcastTags.addAll(tags)
-                    } catch (e: Exception) {
-                        println("Error loading podcast tags: ${e.message}")
-                    }
-                }
-            }
-            SearchTab.EPISODES -> {
-                if (episodeTags.isEmpty()) {
-                    try {
-                        val tags = controller.service.getEpisodeTags()
-                        episodeTags.clear()
-                        episodeTags.addAll(tags)
-                    } catch (e: Exception) {
-                        println("Error loading episode tags: ${e.message}")
-                    }
-                }
-            }
-        }
-
-        // Perform initial search if needed
-        if ((selectedTab == SearchTab.TALKS && talkResults.isEmpty() && !isLoadingTalks) ||
-            (selectedTab == SearchTab.PODCASTS && podcastResults.isEmpty() && !isLoadingPodcasts) ||
-            (selectedTab == SearchTab.EPISODES && episodeResults.isEmpty() && !isLoadingEpisodes)) {
-            performSearch(selectedTab)
-        }
+        )
     }
 
-    // Perform search when query or active tags change
+    // OPTIMIZATION: Trigger search after query or tag changes
     LaunchedEffect(query, activeTalkTags.toList(), activePodcastTags.toList(), activeEpisodeTags.toList()) {
-        performSearch(selectedTab)
+        if (initialLoadDone[selectedTab] == true) { // Only trigger if initial load is done
+            performDebouncedSearch(Unit)
+        }
+    }
+
+    // Cancel all search jobs when leaving the screen
+    DisposableEffect(Unit) {
+        onDispose {
+            searchJobs.values.forEach { it?.cancel() }
+        }
     }
 
     // Main UI
@@ -384,8 +520,9 @@ fun SearchScreen(
             when (selectedTab) {
                 SearchTab.TALKS -> {
                     if (isLoadingTalks && talkResults.isEmpty()) {
-                        LoadingIndicator("Loading talks...")
-                    } else if (talkResults.isEmpty()) {
+                        // OPTIMIZATION: Show skeleton loader instead of spinner
+                        SkeletonLoader()
+                    } else if (talkResults.isEmpty() && initialLoadDone[selectedTab] == true) {
                         EmptyResults("No talks found matching your criteria")
                     } else {
                         TalksResults(
@@ -399,8 +536,9 @@ fun SearchScreen(
                 }
                 SearchTab.PODCASTS -> {
                     if (isLoadingPodcasts && podcastResults.isEmpty()) {
-                        LoadingIndicator("Loading podcasts...")
-                    } else if (podcastResults.isEmpty()) {
+                        // OPTIMIZATION: Show skeleton loader instead of spinner
+                        SkeletonLoader()
+                    } else if (podcastResults.isEmpty() && initialLoadDone[selectedTab] == true) {
                         EmptyResults("No podcasts found matching your criteria")
                     } else {
                         PodcastsResults(
@@ -414,8 +552,9 @@ fun SearchScreen(
                 }
                 SearchTab.EPISODES -> {
                     if (isLoadingEpisodes && episodeResults.isEmpty()) {
-                        LoadingIndicator("Loading episodes...")
-                    } else if (episodeResults.isEmpty()) {
+                        // OPTIMIZATION: Show skeleton loader instead of spinner
+                        SkeletonLoader()
+                    } else if (episodeResults.isEmpty() && initialLoadDone[selectedTab] == true) {
                         EmptyResults("No episodes found matching your criteria")
                     } else {
                         EpisodesResults(
@@ -452,18 +591,177 @@ fun SearchScreen(
     }
 }
 
+// OPTIMIZATION: Get active tags for the selected tab
+private fun getActiveTags(
+    tab: SearchTab,
+    activeTalkTags: List<String>,
+    activePodcastTags: List<String>,
+    activeEpisodeTags: List<String>
+): List<String> {
+    return when (tab) {
+        SearchTab.TALKS -> activeTalkTags
+        SearchTab.PODCASTS -> activePodcastTags
+        SearchTab.EPISODES -> activeEpisodeTags
+    }
+}
+
+// OPTIMIZATION: Function to perform search with proper error handling
+private fun performSearch(
+    tab: SearchTab,
+    query: String,
+    activeTags: List<String>,
+    controller: AppController,
+    searchJobs: MutableMap<SearchTab, Job?>,
+    onLoadStarted: () -> Unit,
+    onLoadCompleted: (List<Any>, String?, Boolean) -> Unit
+) {
+    // Cancel any existing search for this tab
+    searchJobs[tab]?.cancel()
+
+    // Start new search
+    searchJobs[tab] = CoroutineScope(Dispatchers.IO).launch {
+        try {
+            withContext(Dispatchers.Main) { onLoadStarted() }
+
+            // Clear results for tab
+            val result = controller.service.searchContent(
+                query = query,
+                searchTab = tab,
+                activeTags = activeTags,
+                cursor = null, // Start a new search
+                limit = 20
+            )
+
+            // Update with new results
+            withContext(Dispatchers.Main) {
+                @Suppress("UNCHECKED_CAST")
+                onLoadCompleted(
+                    result.items as List<Any>,
+                    result.nextCursor,
+                    result.hasMore
+                )
+            }
+        } catch (e: Exception) {
+            println("Search error for $tab: ${e.message}")
+            withContext(Dispatchers.Main) {
+                onLoadCompleted(emptyList(), null, false)
+            }
+        }
+    }
+}
+
+// OPTIMIZATION: Function to load more results with pagination
+private suspend fun loadMoreResults(
+    selectedTab: SearchTab,
+    cursor: String?,
+    query: String,
+    activeTags: List<String>,
+    controller: AppController,
+    onLoadStarted: () -> Unit,
+    onLoadCompleted: (List<Any>, String?, Boolean) -> Unit
+) {
+    try {
+        onLoadStarted()
+
+        val result = controller.service.searchContent(
+            query = query,
+            searchTab = selectedTab,
+            activeTags = activeTags,
+            cursor = cursor,
+            limit = 20,
+            backward = false
+        )
+
+        // Update with new results
+        @Suppress("UNCHECKED_CAST")
+        onLoadCompleted(
+            result.items as List<Any>,
+            result.nextCursor,
+            result.hasMore
+        )
+    } catch (e: Exception) {
+        println("Error loading more results: ${e.message}")
+        onLoadCompleted(emptyList(), null, false)
+    }
+}
+
+
+// OPTIMIZATION: Improved skeleton loader with animation
 @Composable
-private fun LoadingIndicator(message: String) {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            CircularProgressIndicator()
-            Text(text = message)
+private fun SkeletonLoader() {
+    // Create shimmer animation
+    val transition = rememberInfiniteTransition(label = "skeleton")
+    val alpha by transition.animateFloat(
+        initialValue = 0.2f,
+        targetValue = 0.6f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "skeleton"
+    )
+
+    // Create shimmer brush
+    val shimmerBrush = Brush.linearGradient(
+        colors = listOf(
+            MaterialTheme.colors.onSurface.copy(alpha = alpha),
+            MaterialTheme.colors.onSurface.copy(alpha = 0.2f),
+            MaterialTheme.colors.onSurface.copy(alpha = alpha)
+        )
+    )
+
+    LazyColumn {
+        repeat(8) {
+            item(key = "skeleton-$it") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Image skeleton
+                    Box(
+                        modifier = Modifier
+                            .size(60.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(shimmerBrush)
+                    )
+
+                    // Content skeleton
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Title skeleton
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.7f)
+                                .height(16.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(shimmerBrush)
+                        )
+
+                        // Subtitle skeleton
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.5f)
+                                .height(12.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(shimmerBrush)
+                        )
+
+                        // Content skeleton
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.8f)
+                                .height(10.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(shimmerBrush)
+                        )
+                    }
+                }
+                HDivider()
+            }
         }
     }
 }
@@ -482,20 +780,9 @@ private fun EmptyResults(message: String) {
     }
 }
 
-// Assuming HDivider is defined elsewhere, if not, here's a simple implementation
-@Composable
-fun HDivider() {
-    Spacer(
-        modifier = Modifier
-            .height(1.dp)
-            .fillMaxWidth()
-            .background(MaterialTheme.colors.greyGrey5)
-    )
-}
-
 // Helper functions for query highlighting
 internal fun AnnotatedString.Builder.appendWithQuery(value: String, query: String) {
-    if (!value.contains(query, ignoreCase = true)) {
+    if (query.isBlank() || !value.contains(query, ignoreCase = true)) {
         append(value)
         return
     }
@@ -509,23 +796,60 @@ internal fun AnnotatedString.Builder.appendWithQuery(value: String, query: Strin
 }
 
 internal fun AnnotatedString.Builder.appendPartWithQuery(value: String, query: String) {
-    val value = value.replace('\n', ' ')
-    val length = minOf(150, value.length)
-    if (!value.contains(query, ignoreCase = true)) {
+    if (query.isBlank()) {
+        // For blank queries, just show a short preview
+        val length = minOf(75, value.length)  // Reduced from 150 to 75 for shorter preview
         append(value.substring(0, length))
+        if (value.length > length) append("...")
         return
     }
-    val startIndex = value.indexOf(query, ignoreCase = true)
+
+    val processedValue = value.replace('\n', ' ')
+    if (!processedValue.contains(query, ignoreCase = true)) {
+        // For text without the query, just show a short preview
+        val length = minOf(75, processedValue.length)  // Reduced from 150 to 75
+        append(processedValue.substring(0, length))
+        if (processedValue.length > length) append("...")
+        return
+    }
+
+    val startIndex = processedValue.indexOf(query, ignoreCase = true)
     val endIndex = startIndex + query.length
-    val start = maxOf(0, startIndex - 75)
-    val end = minOf(value.length, endIndex + 75)
-    append("...")
-    append(value.substring(start, startIndex))
+
+    // Use shorter context around the match - reduce from 75 to 40 characters
+    val start = maxOf(0, startIndex - 40)
+    val end = minOf(processedValue.length, endIndex + 40)
+
+    // Add ellipses at start if needed
+    if (start > 0) append("...")
+
+    append(processedValue.substring(start, startIndex))
     pushStyle(SpanStyle(color = white, background = orange))
-    append(value.substring(startIndex, endIndex))
+    append(processedValue.substring(startIndex, endIndex))
     pop()
-    append(value.substring(endIndex, end))
-    append("...")
+
+    // Limit the amount of text after the match
+    val visibleAfterMatch = minOf(40, processedValue.length - endIndex)
+    append(processedValue.substring(endIndex, endIndex + visibleAfterMatch))
+
+    // Add ellipses at end if needed
+    if (endIndex + visibleAfterMatch < processedValue.length) append("...")
+}
+
+// OPTIMIZATION: Efficient debounce function
+fun <T> debounce(
+    waitMs: Long = 300L,
+    scope: CoroutineScope,
+    destinationFunction: suspend (T) -> Unit
+): (T) -> Unit {
+    var debounceJob: Job? = null
+    return { param: T ->
+        debounceJob?.cancel()
+        debounceJob = scope.launch {
+            delay(waitMs)
+            destinationFunction(param)
+        }
+    }
 }
 
 // Conversion functions
@@ -684,8 +1008,7 @@ private fun EpisodesResults(
     }
 }
 
-
-// Existing TalkSearchResult, PodcastSearchResult, EpisodeSearchResult remain unchanged
+// OPTIMIZATION: More efficient item rendering
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TalkSearchResult(
@@ -746,10 +1069,11 @@ private fun PodcastSearchResult(
     ) {
         Column(Modifier.padding(16.dp)) {
             Row {
+                // OPTIMIZATION: Fixed-size image with placeholder
                 AsyncImage(
                     imageUrl = imageUrl ?: "",
                     contentDescription = "Podcast Cover",
-                    modifier = Modifier.size(60.dp)
+                    modifier = Modifier.size(60.dp),
                 )
                 Column(
                     Modifier
@@ -770,8 +1094,9 @@ private fun PodcastSearchResult(
             if (tags.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 FlowRow {
-                    activeTags.forEach { tag ->
-                        if (tag !in tags) return@forEach
+                    // OPTIMIZATION: Show only active tags first, then up to 3 inactive tags
+                    val activeTagsToShow = activeTags.filter { it in tags }
+                    activeTagsToShow.forEach { tag ->
                         Tag(
                             icon = null,
                             text = tag,
@@ -779,8 +1104,9 @@ private fun PodcastSearchResult(
                             isActive = true
                         )
                     }
-                    tags.forEach { tag ->
-                        if (tag in activeTags) return@forEach
+
+                    val inactiveTags = tags.filter { it !in activeTags }.take(3)
+                    inactiveTags.forEach { tag ->
                         Tag(
                             icon = null,
                             text = tag,
@@ -818,7 +1144,7 @@ private fun EpisodeListItem(
             AsyncImage(
                 imageUrl = episode.imageUrl ?: "",
                 contentDescription = "Episode Cover",
-                modifier = Modifier.size(60.dp)
+                modifier = Modifier.size(60.dp),
             )
 
             // Main content column
@@ -826,9 +1152,13 @@ private fun EpisodeListItem(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // Episode title with minimal highlighting
+                // OPTIMIZATION: More efficient highlighting with caching
+                val highlightedTitle = remember(episode.title, query) {
+                    highlightQueryText(episode.title, query)
+                }
+
                 Text(
-                    text = highlightQuery(episode.title, query),
+                    text = highlightedTitle,
                     style = MaterialTheme.typography.subtitle1.copy(fontWeight = FontWeight.Bold),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
@@ -873,7 +1203,6 @@ private fun EpisodeListItem(
     }
 }
 
-
 private fun formatDate(timestamp: Long): String {
     val date = Instant.ofEpochMilli(timestamp)
         .atZone(ZoneId.systemDefault())
@@ -887,9 +1216,8 @@ private fun formatDuration(seconds: Long): String {
     return "${minutes}:${remainingSeconds.toString().padStart(2, '0')}"
 }
 
-// Helper function for query highlighting
-@Composable
-private fun highlightQuery(text: String, query: String): AnnotatedString {
+// OPTIMIZATION: More efficient query highlighting that doesn't rely on Composable context
+private fun highlightQueryText(text: String, query: String): AnnotatedString {
     if (query.isBlank() || !text.contains(query, ignoreCase = true))
         return AnnotatedString(text)
 
@@ -898,7 +1226,7 @@ private fun highlightQuery(text: String, query: String): AnnotatedString {
         val endIndex = startIndex + query.length
 
         append(text.substring(0, startIndex))
-        withStyle(SpanStyle(background = MaterialTheme.colors.primary.copy(alpha = 0.3f))) {
+        withStyle(SpanStyle(background = orange.copy(alpha = 0.3f))) {
             append(text.substring(startIndex, endIndex))
         }
         append(text.substring(endIndex))

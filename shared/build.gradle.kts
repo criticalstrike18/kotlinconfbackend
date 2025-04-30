@@ -12,16 +12,7 @@ kotlin {
     System.setProperty("kotlin.native.ignoreDisabledTargets", "true")
     androidTarget()
     jvm()
-
-//    wasmJs {
-//        binaries.executable()
-//        browser {
-//            commonWebpackConfig {
-//                outputFileName = "kotlin-app-wasm-js.js"
-//            }
-//        }
-//    }
-//
+    
 //    js {
 //        binaries.executable()
 //        browser {
@@ -154,21 +145,7 @@ kotlin {
                 implementation(libs.android.svg)
             }
         }
-//        val webMain by creating {
-//            dependsOn(mobileMain)
-//
-//            dependencies {
-//                implementation(libs.ktor.client.js)
-//            }
-//        }
 
-//        val wasmJsMain by getting {
-//            dependsOn(webMain)
-//        }
-//
-//        val jsMain by getting {
-//            dependsOn(webMain)
-//        }
     }
 }
 
@@ -181,7 +158,7 @@ android {
     sourceSets["main"].resources.srcDirs("src/mobileMain/resources")
 
     defaultConfig {
-        targetSdk = libs.versions.android.targetSdk.get().toInt()
+        lint.targetSdk = libs.versions.android.targetSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
     }
     compileOptions {
@@ -204,29 +181,6 @@ compose.desktop {
         mainClass = "org.jetbrains.kotlinApp.MainKt"
     }
 }
-
-//compose.experimental {
-//    web.application {}
-//}
-
-//val buildWebApp by tasks.creating(Copy::class) {
-//    val wasmWebpack = "wasmJsBrowserProductionWebpack"
-//    val jsWebpack = "jsBrowserProductionWebpack"
-//
-//    dependsOn(wasmWebpack, jsWebpack)
-//
-//    // TODO could be removed after migration to Kotlin 2.0+
-//    kotlin.wasmJs {
-//        applyBinaryen()
-//    }
-//
-//    from(tasks.named(jsWebpack).get().outputs.files)
-//    from(tasks.named(wasmWebpack).get().outputs.files)
-//
-//    into("$buildDir/webApp")
-//
-//    duplicatesStrategy = DuplicatesStrategy.INCLUDE
-//}
 
 sqldelight {
     databases {

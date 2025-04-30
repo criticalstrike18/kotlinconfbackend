@@ -13,8 +13,8 @@ import org.jetbrains.kotlinApp.DatabaseStorage
 import org.jetbrains.kotlinApp.SessionDatabase
 
 class PodcastStateManager(
-    private val context: ApplicationContext,
-    private val scope: CoroutineScope
+    context: ApplicationContext,
+    scope: CoroutineScope
 ) {
     private val driver = DriverFactory(context).createDriver()
     private val database = SessionDatabase(driver)
@@ -38,7 +38,7 @@ class PodcastStateManager(
     init {
         scope.launch {
             while (playbackState.value.episodeId != null) {
-                delay(5000) // Save every 5 seconds
+                delay(2000) // Save every 5 seconds
                 saveCurrentState()
             }
         }

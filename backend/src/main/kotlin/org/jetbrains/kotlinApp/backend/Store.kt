@@ -8,6 +8,8 @@ import io.ktor.server.application.log
 import io.ktor.server.config.ApplicationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.datetime.Instant
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.SchemaUtils
 import org.jetbrains.exposed.sql.SortOrder
@@ -449,6 +451,209 @@ internal class Store(application: Application) {
     suspend fun getSessionCategories(sessionId: String): List<Int> = newSuspendedTransaction(Dispatchers.IO) {
         SessionCategories.selectAll().where { SessionCategories.sessionId eq sessionId }
             .map { it[SessionCategories.categoryId]}
+    }
+
+    suspend fun getSessionsChangedSince(timestamp: Long): List<SessionInfo> = newSuspendedTransaction(Dispatchers.IO) {
+        val sinceInstant = Instant.fromEpochMilliseconds(timestamp)
+        val sinceDateTime = sinceInstant.toLocalDateTime(TimeZone.UTC)
+
+        ConferenceSessions.selectAll()
+            .where { ConferenceSessions.updatedAt greaterEq sinceDateTime } // Updated to use LocalDateTime
+            .map { row ->
+                val speakerIds = SessionSpeakers.selectAll()
+                    .where { SessionSpeakers.sessionId eq row[ConferenceSessions.id] }
+                    .map { it[SessionSpeakers.speakerId] }
+
+                val categoryIds = SessionCategories.selectAll()
+                    .where { SessionCategories.sessionId eq row[ConferenceSessions.id] }
+                    .map { it[SessionCategories.categoryId] }
+
+                SessionInfo(
+                    id = row[ConferenceSessions.id],
+                    title = row[ConferenceSessions.title],
+                    description = row[ConferenceSessions.description],
+                    startsAt = row[ConferenceSessions.startsAt].toGMTDate(),
+                    endsAt = row[ConferenceSessions.endsAt].toGMTDate(),
+                    roomId = row[ConferenceSessions.roomId]?.toInt(),
+                    isServiceSession = row[ConferenceSessions.isServiceSession],
+                    isPlenumSession = row[ConferenceSessions.isPlenumSession],
+                    status = row[ConferenceSessions.status],
+                    speakerIds = speakerIds,
+                    categoryIds = categoryIds.map { it }
+                )
+            }
+    }
+
+    suspend fun getSpeakersChangedSince(timestamp: Long): List<SpeakerInfo> = newSuspendedTransaction(Dispatchers.IO) {
+        val sinceInstant = Instant.fromEpochMilliseconds(timestamp)
+        val sinceDateTime = sinceInstant.toLocalDateTime(TimeZone.UTC)
+
+        ConferenceSpeakers.selectAll()
+            .where { ConferenceSpeakers.updatedAt greaterEq sinceDateTime }
+            .map { row ->
+                SpeakerInfo(
+                    id = row[ConferenceSpeakers.id],
+                    firstName = row[ConferenceSpeakers.firstName],
+                    lastName = row[ConferenceSpeakers.lastName],
+                    bio = row[ConferenceSpeakers.bio],
+                    tagLine = row[ConferenceSpeakers.tagLine],
+                    profilePicture = row[ConferenceSpeakers.profilePicture],
+                    isTopSpeaker = row[ConferenceSpeakers.isTopSpeaker]
+                )
+            }
+    }
+
+    suspend fun getRoomsChangedSince(timestamp: Long): List<RoomTable> = newSuspendedTransaction(Dispatchers.IO) {
+        val sinceInstant = Instant.fromEpochMilliseconds(timestamp)
+        val sinceDateTime = sinceInstant.toLocalDateTime(TimeZone.UTC)
+
+        ConferenceRooms.selectAll()
+            .where { ConferenceRooms.updatedAt greaterEq sinceDateTime }
+            .map { row ->
+                RoomTable(
+                    id = row[ConferenceRooms.id].toLong(),
+                    name = row[ConferenceRooms.name],
+                    sort = row[ConferenceRooms.sort]
+                )
+            }
+    }
+
+    suspend fun getCategoriesChangedSince(timestamp: Long): List<CategoriesTable> = newSuspendedTransaction(Dispatchers.IO) {
+        val sinceInstant = Instant.fromEpochMilliseconds(timestamp)
+        val sinceDateTime = sinceInstant.toLocalDateTime(TimeZone.UTC)
+
+        ConferenceCategories.selectAll()
+            .where { ConferenceCategories.updatedAt greaterEq sinceDateTime }
+            .map { row ->
+                CategoriesTable(
+                    id = row[ConferenceCategories.id].toLong(),
+                    title = row[ConferenceCategories.title],
+                    sort = row[ConferenceCategories.sort],
+                    type = row[ConferenceCategories.type]
+                )
+            }
+    }
+
+    suspend fun getPodcastsChangedSince(timestamp: Long): List<ChannelFullData> = newSuspendedTransaction(Dispatchers.IO) {
+        val sinceInstant = Instant.fromEpochMilliseconds(timestamp)
+        val sinceDateTime = sinceInstant.toLocalDateTime(TimeZone.UTC)
+
+        // 1. Find channels updated since timestamp
+        val updatedChannelIds = PodcastChannels.selectAll()
+            .where { PodcastChannels.updatedAt greaterEq sinceDateTime }
+            .map { it[PodcastChannels.id] }
+            .toSet()
+
+        // 2. Find channels with episodes updated since timestamp
+        val channelsWithUpdatedEpisodes = PodcastEpisodes.selectAll()
+            .where { PodcastEpisodes.updatedAt greaterEq sinceDateTime }
+            .map { it[PodcastEpisodes.channelId] }
+            .toSet()
+
+        // 3. Combine both sets for all affected channels
+        val allAffectedChannelIds = updatedChannelIds + channelsWithUpdatedEpisodes
+
+        // 4. Find updates to channel or episode categories that might affect our channels
+        val channelCategoryUpdates = ChannelCategoryMap.selectAll()
+            .where { ChannelCategoryMap.updatedAt greaterEq sinceDateTime }
+            .map { it[ChannelCategoryMap.channelId] }
+            .toSet()
+
+        val episodeCategoryUpdatedEpisodes = EpisodeCategoryMap.selectAll()
+            .where { EpisodeCategoryMap.updatedAt greaterEq sinceDateTime }
+            .map { it[EpisodeCategoryMap.episodeId] }
+
+        val channelsWithCategoryUpdatedEpisodes = if (episodeCategoryUpdatedEpisodes.isNotEmpty()) {
+            PodcastEpisodes.selectAll()
+                .where { PodcastEpisodes.id inList episodeCategoryUpdatedEpisodes }
+                .map { it[PodcastEpisodes.channelId] }
+                .toSet()
+        } else {
+            emptySet()
+        }
+
+        // 5. Combine all affected channel IDs
+        val finalAffectedChannelIds = allAffectedChannelIds + channelCategoryUpdates + channelsWithCategoryUpdatedEpisodes
+
+        if (finalAffectedChannelIds.isEmpty()) {
+            return@newSuspendedTransaction emptyList()
+        }
+
+        // Fetch data for affected channels
+        val allChannelCategories = PodcastChannelCategories
+            .selectAll()
+            .associate { it[PodcastChannelCategories.id] to it[PodcastChannelCategories.name] }
+
+        val allEpisodeCategories = PodcastEpisodeCategories
+            .selectAll()
+            .associate { it[PodcastEpisodeCategories.id] to it[PodcastEpisodeCategories.name] }
+
+        val channelCategories = ChannelCategoryMap
+            .selectAll()
+            .where { ChannelCategoryMap.channelId inList finalAffectedChannelIds }
+            .groupBy({ it[ChannelCategoryMap.channelId] }) { it[ChannelCategoryMap.categoryId] }
+            .mapValues { (_, categoryIds) -> categoryIds.mapNotNull { allChannelCategories[it] } }
+
+        val allEpisodesForChannels = PodcastEpisodes
+            .selectAll()
+            .where { PodcastEpisodes.channelId inList finalAffectedChannelIds }
+            .map { it[PodcastEpisodes.id] }
+
+        val episodeCategories = if (allEpisodesForChannels.isNotEmpty()) {
+            EpisodeCategoryMap
+                .selectAll()
+                .where { EpisodeCategoryMap.episodeId inList allEpisodesForChannels }
+                .groupBy({ it[EpisodeCategoryMap.episodeId] }) { it[EpisodeCategoryMap.categoryId] }
+                .mapValues { (_, categoryIds) -> categoryIds.mapNotNull { allEpisodeCategories[it] } }
+        } else {
+            emptyMap()
+        }
+
+        PodcastChannels
+            .selectAll()
+            .where { PodcastChannels.id inList finalAffectedChannelIds }
+            .orderBy(PodcastChannels.id to SortOrder.ASC)
+            .map { channelRow ->
+                val channelId = channelRow[PodcastChannels.id]
+                val episodes = PodcastEpisodes
+                    .selectAll()
+                    .where { PodcastEpisodes.channelId eq channelId }
+                    .orderBy(PodcastEpisodes.pubDate to SortOrder.DESC)
+                    .map { episodeRow ->
+                        val episodeId = episodeRow[PodcastEpisodes.id]
+                        EpisodeData(
+                            id = episodeId,
+                            guid = episodeRow[PodcastEpisodes.guid],
+                            title = episodeRow[PodcastEpisodes.title],
+                            description = episodeRow[PodcastEpisodes.description],
+                            link = episodeRow[PodcastEpisodes.link],
+                            pubDate = episodeRow[PodcastEpisodes.pubDate],
+                            duration = episodeRow[PodcastEpisodes.duration],
+                            explicit = episodeRow[PodcastEpisodes.explicit],
+                            imageUrl = episodeRow[PodcastEpisodes.imageUrl],
+                            mediaUrl = episodeRow[PodcastEpisodes.mediaUrl],
+                            mediaType = episodeRow[PodcastEpisodes.mediaType],
+                            mediaLength = episodeRow[PodcastEpisodes.mediaLength],
+                            episodeCategory = episodeCategories[episodeId] ?: emptyList()
+                        )
+                    }
+
+                ChannelFullData(
+                    id = channelId,
+                    title = channelRow[PodcastChannels.title],
+                    link = channelRow[PodcastChannels.link],
+                    description = channelRow[PodcastChannels.description],
+                    copyright = channelRow[PodcastChannels.copyright],
+                    language = channelRow[PodcastChannels.language],
+                    author = channelRow[PodcastChannels.author],
+                    ownerEmail = channelRow[PodcastChannels.ownerEmail],
+                    ownerName = channelRow[PodcastChannels.ownerName],
+                    imageUrl = channelRow[PodcastChannels.imageUrl],
+                    lastBuildDate = channelRow[PodcastChannels.lastBuildDate].toString(),
+                    categories = channelCategories[channelId] ?: emptyList(),
+                    episodes = episodes
+                )
+            }
     }
 
     suspend fun storePodcastQuery(

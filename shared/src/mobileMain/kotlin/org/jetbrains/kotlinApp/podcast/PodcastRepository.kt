@@ -91,6 +91,7 @@ class PodcastRepository(private val dbStorage: DatabaseStorage) {
         }
     }
 
+
     /**
      * Get episodes for a channel with cursor-based pagination
      */
@@ -170,17 +171,26 @@ class PodcastRepository(private val dbStorage: DatabaseStorage) {
     ): CursorResult<PodcastChannelSearchItem> {
         return withContext(Dispatchers.IO) {
             try {
-                // Use tag filtering as primary search method
-                val results = dbStorage.getChannelsWithFilters(
-                        tags = tags,
-                        query = query.takeIf { it.isNotBlank() },
-                        cursor = cursor,
-                        limit = limit.toLong(),
-                        backward = if (backward) 1L else 0L
-                    )
+                // Use the optimized query with wildcards to improve matches
+                val wildcardQuery = if (query.isBlank()) null else
+                    query.split(" ").filter { it.isNotBlank() }
+                        .joinToString(" ") { "%$it%" }
 
-                // Map database results to UI model
+                val results = dbStorage.getChannelsWithFilters(
+                    tags = tags,
+                    query = wildcardQuery,
+                    cursor = cursor,
+                    limit = limit.toLong(),
+                    backward = if (backward) 1L else 0L
+                )
+
+                // Process results
                 val items = results.map { result ->
+                    // Extract categories from the comma-separated string
+                    val categories = result.categories?.split(",")
+                        ?.map { it.trim() }
+                        ?.filter { it.isNotBlank() } ?: emptyList()
+
                     PodcastChannelSearchItem(
                         id = result.id.toString(),
                         title = result.title,
@@ -188,12 +198,11 @@ class PodcastRepository(private val dbStorage: DatabaseStorage) {
                         description = result.description,
                         imageUrl = result.imageUrl,
                         episodeCount = result.episodeCount ?: 0,
-                        categories = result.categories?.split(",")
-                            ?.map { it.trim() }
-                            ?.filter { it.isNotBlank() } ?: emptyList()
+                        categories = categories
                     )
                 }
 
+                // Return with cursor information for pagination
                 CursorResult(
                     items = items,
                     nextCursor = items.lastOrNull()?.id,
@@ -203,6 +212,8 @@ class PodcastRepository(private val dbStorage: DatabaseStorage) {
             } catch (e: Exception) {
                 println("Channel search error: ${e.message}")
                 e.printStackTrace()
+
+                // Return empty result on error
                 CursorResult(
                     items = emptyList(),
                     nextCursor = null,

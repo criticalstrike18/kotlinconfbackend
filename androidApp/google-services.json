@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1014180673679",
+    "project_id": "kotlinconfapp",
+    "storage_bucket": "kotlinconfapp.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1014180673679:android:9a2ab5c13c1b6da866d8fa",
+        "android_client_info": {
+          "package_name": "com.jetbrains.kotlinApp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAhK6np4fHLIezOMpuroqxbP7UWy7-MFWQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
