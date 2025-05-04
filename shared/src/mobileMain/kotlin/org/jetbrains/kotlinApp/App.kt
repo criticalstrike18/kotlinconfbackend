@@ -15,7 +15,7 @@ import org.jetbrains.kotlinApp.ui.MainScreen
 import org.jetbrains.kotlinApp.ui.theme.KotlinConfTheme
 
 //Backend Config
-const val ip = "192.168.29.31"
+const val ip = "34.27.25.192"
 const val apiEndpoint = "http://$ip:8080"
 const val importEndpoint = "http://$ip:8000"
 
